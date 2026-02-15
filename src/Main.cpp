@@ -1,28 +1,7 @@
-/*
-#include "Move.h"
-#include <iostream>
-
-using namespace HiveGotThis;
-
-int main()
-{
-    //testare l'hash di move
-    Move m1{PieceName::wQ, 0, 128*128-1}; // Queen bianca che si muove dalla posizione 0 alla posizione 16383 (angolo opposto)
-
-    std::cout << "Hash of m1: " << hash(m1) << std::endl;
-    std::cout << "Hash of mPass: " << hash(PassMove) << std::endl;
-
-
-
-    return 0;
-}
-    */
-
 #include <iostream>
 #include <string>
 #include <vector>
 
-// Includiamo i nostri moduli
 #include "Constants.h"
 #include "Enums.h"
 #include "Position.h"
