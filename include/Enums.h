@@ -108,6 +108,7 @@ BugType GetBugType(PieceName p);
 // Controlla se il pezzo è legale per il tipo di partita corrente
 bool PieceNameIsEnabledForGameType(PieceName p, GameType gt);
 
+bool IsPieceNameValid(PieceName p);
 
  /*
  // Calcola la direzione a SINISTRA (Antiorario)
