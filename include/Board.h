@@ -13,7 +13,7 @@ namespace HiveGotThis
 
 class Board
 {
-    public:
+    private:
         // Rappresentazione interna della board (Array di PieceName), praticamente una matrice BoardWidth x BoardWidth appiattita in un array monodimensionale.
         PieceName cells[BoardSize];
 
