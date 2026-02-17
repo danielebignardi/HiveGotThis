@@ -7,6 +7,7 @@
 #include "Constants.h"
 
 #include <cassert>
+#include <vector>
 
 namespace HiveGotThis
 {  
@@ -25,6 +26,23 @@ class Board
         BoardState boardState = BoardState::NotStarted;
         Color currentColor = Color::White;
         int currentTurn = 0;
+
+        // --- ZOBRIST HASHING ---
+        // 3. Altezza della pila in ogni casella (Necessario per la robustezza Zobrist)
+        //    0 = vuoto, 1 = un pezzo, 2 = due pezzi (uno sopra l'altro), ecc.
+        int8_t stackHeight[BoardSize];
+        // 1. La "Impronta Digitale" attuale della board
+        uint64_t currentHash; 
+        // 2. La tabella dei numeri casuali (Statica perché è uguale per tutte le board che creo nell'esecuzione del programma)
+        //    [Pezzo][Posizione]
+        static uint64_t ZobristTable[NumPieceNames][BoardSize];
+        // Tabella B: Identifica il pezzo a una certa altezza (Chi e a che piano)
+        // 8 è un limite sicuro (in Hive raramente si superano i 3 piani)
+        static uint64_t ZobristLevel[NumPieceNames][8];
+        // 3. Hash per indicare di chi è il turno (Black to move)
+        static uint64_t ZobristBlackTurn; 
+        // 4. Lo Storico degli Hash (per la regola della tripla ripetizione)
+        std::vector<uint64_t> hashHistory;
 
         /*
             FUNZIONI DI STATO (non fanno check dell'input a runtime, si assume che chi le chiama stia facendo la cosa giusta)
@@ -55,6 +73,13 @@ class Board
         BoardState GetBoardState();
         int GetCurrentTurn();
 
+        // --- ZOBRIST HASHING ---
+        // Funzione statica da chiamare UNA VOLTA nel main per inizializzare i numeri casuali
+        static void InitializeZobristTable(); 
+        // Getter per l'hash attuale (utile per l'AI)
+        uint64_t GetHash();
+        // Helper per cambiare il turno nell'hash
+        void ToggleTurnHash() { currentHash ^= ZobristBlackTurn; }
 };   
 
 
@@ -106,6 +131,11 @@ inline BoardState Board::GetBoardState()
 inline int Board::GetCurrentTurn()
 {
     return currentTurn;
+}
+
+inline uint64_t Board::GetHash()
+{
+    return currentHash;
 }
 
 } // namespace HiveGotThis
