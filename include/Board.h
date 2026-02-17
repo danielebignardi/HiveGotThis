@@ -13,7 +13,7 @@ namespace HiveGotThis
 
 class Board
 {
-    private:
+    public:
         // Rappresentazione interna della board (Array di PieceName), praticamente una matrice BoardWidth x BoardWidth appiattita in un array monodimensionale.
         PieceName cells[BoardSize];
 
@@ -42,7 +42,7 @@ class Board
         */
         PieceName PopAt(Index position); // Rimuove e restituisce il pezzo in cima alla posizione, o INVALID se non c'è nulla da rimuovere (usato internamente quando si muove un pezzo, per rimuoverlo dalla vecchia posizione)
         void PushAt(PieceName pieceName, Index position); // Pusha il pezzo sulla pila in position (usato internamente quando si muove o si piazza un pezzo). Non si preoccupa se il pezzo prima era da qualche parte, quindi potenzialmente si possono generare inconsistenze
-        //ATTENZIONE:  In move non si effettuano controlli di validità, si assume che la mossa sia legale e che il pezzo sia effettivamente in gioco e in cima a una pila o in mano.
+        //ATTENZIONE:  In move non si effettuano controlli di validità, si assume che la mossa sia legale e che il pezzo sia effettivamente in cima a una pila o in mano.
         void MovePiece(PieceName pieceName, Index newPosition); // Muove un pezzo da dov'è a newPosition, gestendo tutto (rimozione dalla vecchia posizione, piazzamento nella nuova posizione).
 
         /*
@@ -50,7 +50,11 @@ class Board
         */
 
     public:
-        Board(); // Costruttore che inizializza la board vuota (tutti PieceName::INVALID) e tutti i pezzi in mano (NullIndex) e nessun pezzo sotto a nessun altro (tutti PieceName::INVALID)
+        Board(GameType gameType); // Costruttore che inizializza la board vuota (tutti PieceName::INVALID) e tutti i pezzi in mano (NullIndex) e nessun pezzo sotto a nessun altro (tutti PieceName::INVALID)
+
+        BoardState GetBoardState();
+        int GetCurrentTurn();
+
 };   
 
 
@@ -94,6 +98,15 @@ inline bool Board::PieceIsOnTop(PieceName pieceName) const
     return cells[pos] == pieceName; // Il pezzo è in cima se è quello che si trova nella cella della sua posizione
 }
 
+inline BoardState Board::GetBoardState()
+{
+    return boardState;
+}
+
+inline int Board::GetCurrentTurn()
+{
+    return currentTurn;
+}
 
 } // namespace HiveGotThis
 

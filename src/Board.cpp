@@ -5,8 +5,10 @@
 namespace HiveGotThis
 {  
 
-Board::Board()
+Board::Board(GameType gameType)
 {
+    this->gameType = gameType;
+
     // Riempie tutto l'array 'cells' con INVALID
     std::fill(std::begin(cells), std::end(cells), PieceName::INVALID);
     

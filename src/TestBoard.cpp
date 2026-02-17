@@ -53,7 +53,7 @@ int main() {
     std::cout << "--- HIVE ENGINE: BOARD UNIT TEST ---" << std::endl;
 
     try {
-        Board b;
+        Board b(GameType::BaseLP);
 
         TestInizializzazione(b);
         TestPiazzamentoEMovimento(b);
