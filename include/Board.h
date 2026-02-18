@@ -63,6 +63,9 @@ class Board
         //ATTENZIONE:  In move non si effettuano controlli di validità, si assume che la mossa sia legale e che il pezzo sia effettivamente in cima a una pila o in mano.
         void MovePiece(PieceName pieceName, Index newPosition); // Muove un pezzo da dov'è a newPosition, gestendo tutto (rimozione dalla vecchia posizione, piazzamento nella nuova posizione).
 
+        bool CanMoveWithoutBreakingHive(PieceName piece) const;
+        bool IsOneHive(Index ignorePos) const;
+
         /*
             ALTRO
         */

@@ -125,5 +125,104 @@ void Board::InitializeZobristTable()
     ZobristBlackTurn = dist(gen);
 }
 
+bool Board::CanMoveWithoutBreakingHive(PieceName piece) const
+{
+    Index pos = piecesPositions[piece];
+    
+    // CASO 1: Il pezzo non è sulla board (è in mano)
+    if (PieceInHand(piece)) return true; 
+
+    // 2. CHECK FONDAMENTALE: Sono coperto?
+    // Se GetPieceAt(pos) non sono io, significa che c'è qualcuno sopra di me!
+    // Non posso muovermi, quindi la domanda "rompo l'alveare?" è irrilevante.
+    // Ritorniamo false (o gestiamo l'errore, ma false blocca la mossa).
+    if (GetPieceAt(pos) != piece) {
+        assert(GetPieceAt(pos) == piece && "Si è provata CanMoveWithoutBreakingHive su un pezzo coperto");
+        return false; 
+    }
+
+    // Sono in cima, ma c'è qualcuno sotto?
+    // Se sono appoggiato su un altro pezzo, posso spostarmi senza rompere nulla.
+    if (below[piece] != PieceName::INVALID) {
+        return true; 
+    }
+
+    // 4. CHECK BASE: Sono l'unico pezzo in questa casella (a terra).
+    // Devo simulare la rimozione e vedere se tutto resta connesso.
+    // Invece di togliere il pezzo e verificare che l'hive non sia rotto basta dire a IsOneHive di considerare pos come se fosse vuota
+    return IsOneHive(pos);
+}
+
+bool Board::IsOneHive(Index ignorePos) const
+{
+    // OTTIMIZZAZIONE 1: Array visited indicizzato per Pezzo (O(1))
+    // Usiamo l'ID del pezzo come indice. Inizializzato a false.
+    bool visitedPieces[NumPieceNames] = { false };
+    
+    // OTTIMIZZAZIONE 2: Vector pre-allocato come coda
+    // Riserviamo spazio per tutti i pezzi possibili per evitare allocazioni
+    static std::vector<Index> queue; // static per non riallocare ogni volta (opzionale ma veloce)
+    queue.clear();
+    queue.reserve(NumPieceNames);
+
+    int nodesFound = 0;
+    int nodesExpected = 0;
+    Index startNode = NullIndex;
+
+    // 1. Conta i nodi attesi (ovvero il numero di posizioni occupate esclusa ignorePos) e trova startNode
+    for (int i = 0; i < NumPieceNames; ++i) {
+        Index pos = piecesPositions[i];
+        
+        // Se non in gioco o è nella casella ignorata
+        if (pos == NullIndex || pos == ignorePos) continue;
+
+        // Se è il pezzo in cima alla pila
+        if (PieceIsOnTop(static_cast<PieceName>(i))) {
+            nodesExpected++;
+            if (startNode == NullIndex) startNode = pos;
+        }
+    }
+
+    if (nodesExpected == 0) return true;
+
+    // 2. Setup BFS
+    queue.push_back(startNode);
+    
+    // Segniamo come visitato il pezzo che si trova a startNode
+    PieceName startPiece = cells[startNode];
+    visitedPieces[startPiece] = true;
+    nodesFound++;
+
+    // 3. Loop BFS (usando indice 'head' invece di pop)
+    int head = 0;
+    while(head < queue.size()) {
+        Index currentPos = queue[head++]; // Leggi e avanza cursore
+
+        // Controlla i 6 vicini
+        for (int offset : NeighborOffsets) {
+            Index neighborPos = currentPos + offset;
+
+            // Ignora la casella "rimossa"
+            if (neighborPos == ignorePos) continue;
+
+            // Leggi chi c'è (O(1))
+            PieceName neighborPiece = cells[neighborPos];
+
+            // Se vuoto, salta
+            if (neighborPiece == PieceName::INVALID) continue;
+
+            // OTTIMIZZAZIONE 1 in azione: Controllo istantaneo
+            if (visitedPieces[neighborPiece]) continue;
+
+            // Trovato nuovo pezzo connesso!
+            visitedPieces[neighborPiece] = true; // Segna come visto
+            queue.push_back(neighborPos);        // Aggiungi alla coda
+            nodesFound++;
+        }
+    }
+
+    return nodesFound == nodesExpected;
+}
+
 
 }
