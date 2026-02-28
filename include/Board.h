@@ -101,7 +101,7 @@ class Board
         void GetEmptyNeighbors(Index pos, std::vector<Index>& result) const;
 
         // true se un pezzo si può spostare dalla posizione pos in direzione dir, muovendosi sullo stesso piano (Ground) o spostandosi di piano (Beetle)
-        bool Board::CanSlide(Index pos, Direction dir, SlideMode mode) const;
+        bool CanSlide(Index pos, Direction dir, SlideMode mode) const;
 
         // SARA 27 FEB
         //PER FUNZIONE CAN SLIDE: Pre-calcoliamo le "slide gates" per ogni direzione, ovvero le due posizioni che devono essere libere per poter scivolare in quella direzione
@@ -116,7 +116,7 @@ class Board
         };
 
         // Restituisce gli indici dei vicini verso i quali si può spostare, eccetto quelli già visitati
-        void Board::GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result) const;
+        void GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result) const;
 
 
 
@@ -126,7 +126,7 @@ class Board
         void GetValidMoves(std::vector<Move>& moves) const;
 
         // Piazzamento: al turno corrente, true se è possibile piazzare in una determinata posizione
-        bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const;
+        bool CanPlaceAt(Index pos, Color myColor, int currentTurn) const;
 
         // Piazzamento: celle vuote adiacenti all'hive, non adiacenti a pezzi avversari
         void GetValidPlacements(Color color, std::vector<Move>& moves) const;
