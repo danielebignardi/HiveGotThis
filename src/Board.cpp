@@ -226,41 +226,27 @@ bool Board::IsOneHive(Index ignorePos) const
 
 // - - - - - - - - - - FUNZIONI DI UTILITÀ PER LA GENERAZIONE DELLE MOSSE - - - - - - - - - -
 
-int Board::GetDirection(Index from, Index to) const
+// SARA 27 FEB
+// FREEDOM OF MOVEMENT RULE
+bool Board::CanSlide(Index pos, Direction dir, SlideMode mode) const
 {
-    for (int i = 0; i < 6; i++)
+    uint8_t d = static_cast<uint8_t>(dir);
+    Index gate1 = pos + SlideGates[d][0];
+    Index gate2 = pos + SlideGates[d][1];
+
+    if (mode == SlideMode::Beetle)
     {
-        if (from + NeighborOffsets[i] == to) return i;
+        Index dest    = pos + NeighborOffsets[d];
+        int maxHeight = std::max((int)stackHeight[pos], (int)stackHeight[dest]);
+        int minGate   = std::min((int)stackHeight[gate1], (int)stackHeight[gate2]);
+        return minGate < maxHeight;
     }
-    return -1;
-}
 
-bool Board::CanSlide(Index from, Index to) const
-{
-    int dir = GetDirection(from, to);
-    assert(dir != -1 && "CanSlide chiamato con celle non adiacenti!");
-
-    bool leftOccupied  = IsValidIndex(from + NeighborOffsets[(dir + 5) % 6]) && HasPieceAt(from + NeighborOffsets[(dir + 5) % 6]);
-    bool rightOccupied = IsValidIndex(from + NeighborOffsets[(dir + 1) % 6]) && HasPieceAt(from + NeighborOffsets[(dir + 1) % 6]);
-
-    if (leftOccupied && rightOccupied) return false;
-    return leftOccupied || rightOccupied;
-}
-
-bool Board::CanSlideWithHeight(Index from, Index to) const
-{
-    int dir = GetDirection(from, to);
-    assert(dir != -1 && "CanSlideWithHeight chiamato con celle non adiacenti!");
-
-    Index left  = from + NeighborOffsets[(dir + 5) % 6];
-    Index right = from + NeighborOffsets[(dir + 1) % 6];
-
-    int hLeft  = IsValidIndex(left)  ? stackHeight[left]  : 0;
-    int hRight = IsValidIndex(right) ? stackHeight[right] : 0;
-    int hFrom  = stackHeight[from];
-    int hTo    = stackHeight[to];
-
-    return (std::min(hLeft, hRight) < std::max(hFrom, hTo));
+    // SlideMode::Ground — pezzi a terra
+    bool g1 = HasPieceAt(gate1);
+    bool g2 = HasPieceAt(gate2);
+    if (g1 && g2) return false;
+    return g1 || g2;
 }
 
 void Board::GetOccupiedNeighbors(Index pos, std::vector<Index>& result) const
@@ -283,21 +269,18 @@ void Board::GetEmptyNeighbors(Index pos, std::vector<Index>& result) const
     }
 }
 
-void Board::GetOneSlideSteps(Index from, bool visited[], std::vector<Index>& result) const
+void Board::GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result) const
 {
     for (int i = 0; i < 6; i++)
     {
         Index neighbor = from + NeighborOffsets[i];
-
         if (!IsValidIndex(neighbor)) continue;
-        if (HasPieceAt(neighbor)) continue;
+        if (mode == SlideMode::Ground && HasPieceAt(neighbor)) continue;    // se siamo in modalità Ground allora saltiamo le celle su cui c'è già un pezzo
         if (visited[neighbor]) continue;
-        if (!CanSlide(from, neighbor)) continue;
-
+        if (!CanSlide(from, static_cast<Direction>(i), mode)) continue;
         result.push_back(neighbor);
     }
 }
-
 
 
 
@@ -309,12 +292,12 @@ void Board::GetQueenBeeMoves(PieceName piece, std::vector<Move>& moves) const
 
     Index pos = piecesPositions[piece];
 
-    bool visited[BoardSize];
+    static bool visited[BoardSize];         // static così viene allocato solo una volta
     memset(visited, 0, sizeof(visited));
     visited[pos] = true;
 
     std::vector<Index> steps;
-    GetOneSlideSteps(pos, visited, steps);
+    GetOneSlideSteps(pos, SlideMode::Ground, visited, steps);
 
     for (Index dest : steps)
     {
@@ -325,35 +308,22 @@ void Board::GetQueenBeeMoves(PieceName piece, std::vector<Move>& moves) const
 
 void Board::GetBeetleMoves(PieceName piece, std::vector<Move>& moves) const
 {
-    // one hive rule
     if (!CanMoveWithoutBreakingHive(piece)) return;
 
     Index pos = piecesPositions[piece];
 
-    // stesse mosse della QueenBee
-    for (int i = 0; i < 6; i++)
-    {
-        Index neighbor = pos + NeighborOffsets[i];
+    static bool visited[BoardSize];
+    memset(visited, 0, sizeof(visited));
+    visited[pos] = true;
 
-        if (!IsValidIndex(neighbor)) continue;      // fuori dalla board
-        
-        if (!HasPieceAt(neighbor))                  // destinazione vuota -> valgono le stesse regole della QueenBee
-        {
-            if (CanSlide(pos, neighbor))
-            {
-                Move move = {piece, pos, neighbor};
-                moves.push_back(move);
-            }
-        }   
-        else
-        {
-            if (CanSlideWithHeight(pos, neighbor))
-            {
-                Move move = {piece, pos, neighbor};
-                moves.push_back(move);
-            }
-        }
-    }   
+    std::vector<Index> steps;
+    GetOneSlideSteps(pos, SlideMode::Beetle, visited, steps);
+
+    for (Index dest : steps)
+    {
+        Move move = {piece, pos, dest};
+        moves.push_back(move);
+    }
 }
 
 void Board::GetGrasshopperMoves(PieceName piece, std::vector<Move>& moves) const
@@ -385,38 +355,34 @@ void Board::GetGrasshopperMoves(PieceName piece, std::vector<Move>& moves) const
 
 void Board::GetSpiderMoves(PieceName piece, std::vector<Move>& moves) const
 {
-    // one hive rule
     if (!CanMoveWithoutBreakingHive(piece)) return;
 
     Index pos = piecesPositions[piece];
 
     // celle già visitate
-    bool visited[BoardSize];
+    static bool visited[BoardSize];
     memset(visited, 0, sizeof(visited));
 
     // indici raggiungibili ad ognuno dei 3 passi
-    std::vector<Index> steps1;
-    std::vector<Index> steps2;
-    std::vector<Index> steps3;
+    std::vector<Index> steps1, steps2, steps3;
 
     // inizio: indici raggiungibili dopo un passo
     visited[pos] = true;
-    steps1.clear();
-    GetOneSlideSteps(pos, visited, steps1);
+    GetOneSlideSteps(pos, SlideMode::Ground, visited, steps1);
 
     for (Index step1 : steps1)      
     {
         visited[step1] = true;
 
         steps2.clear();                     
-        GetOneSlideSteps(step1, visited, steps2);
+        GetOneSlideSteps(step1, SlideMode::Ground, visited, steps2);
 
         for (Index step2 : steps2)
         {
             visited[step2] = true;
 
             steps3.clear();
-            GetOneSlideSteps(step2, visited, steps3);
+            GetOneSlideSteps(step2, SlideMode::Ground, visited, steps3);
 
             for (Index step3 : steps3)
             {
@@ -433,26 +399,29 @@ void Board::GetSpiderMoves(PieceName piece, std::vector<Move>& moves) const
 
 void Board::GetSoldierAntMoves(PieceName piece, std::vector<Move>& moves) const
 {
-    // one hive rule
     if (!CanMoveWithoutBreakingHive(piece)) return;
 
     Index pos = piecesPositions[piece];
 
-    // posizioni già visitate
-    bool visited[BoardSize];
+    // Posizioni già visitate
+    static bool visited[BoardSize];
     memset(visited, 0, sizeof(visited));
     visited[pos] = true;
 
-    // posizioni visitabili
+    // Posizioni visitabili, iniziamo a riempirle con i vicini
     std::vector<Index> queue;
-    queue.clear();
-    GetOneSlideSteps(pos, visited, queue);
+    GetOneSlideSteps(pos, SlideMode::Ground, visited, queue);
+    for (Index cell : queue) visited[cell] = true;
 
     int head = 0;
     while (head < (int)queue.size()) {
-        visited[queue[head]] = true;
-        GetOneSlideSteps(queue[head], visited, queue);
-        head++;
+        Index current = queue[head++];
+        int sizeBefore = queue.size();
+        GetOneSlideSteps(current, SlideMode::Ground, visited, queue);
+
+        // Segna subito come visitati i nuovi nodi aggiunti
+        for (int i = sizeBefore; i < (int)queue.size(); i++)
+            visited[queue[i]] = true;
     }
 
     for (Index cell : queue)
@@ -475,7 +444,7 @@ void Board::GetLadybugMoves(PieceName piece, std::vector<Move>& moves) const
         Index neighbor = pos + NeighborOffsets[i];
         if (!IsValidIndex(neighbor)) continue;
         if (!HasPieceAt(neighbor)) continue;
-        if (!CanSlideWithHeight(pos, neighbor)) continue;
+        if (!CanSlide(pos, static_cast<Direction>(i), SlideMode::Beetle)) continue;
         steps1.push_back(neighbor);
     }
 
@@ -489,7 +458,7 @@ void Board::GetLadybugMoves(PieceName piece, std::vector<Move>& moves) const
             if (!IsValidIndex(neighbor)) continue;
             if (!HasPieceAt(neighbor)) continue;
             if (neighbor == pos) continue;
-            if (!CanSlideWithHeight(step1, neighbor)) continue;
+            if (!CanSlide(step1, static_cast<Direction>(i), SlideMode::Beetle)) continue;
             steps2.push_back(neighbor);
         }
     }
@@ -503,7 +472,7 @@ void Board::GetLadybugMoves(PieceName piece, std::vector<Move>& moves) const
             if (!IsValidIndex(neighbor)) continue;
             if (HasPieceAt(neighbor)) continue;
             if (neighbor == pos) continue;
-            if (!CanSlideWithHeight(step2, neighbor)) continue;
+            if (!CanSlide(step2, static_cast<Direction>(i), SlideMode::Ground)) continue;
 
             Move move = {piece, pos, neighbor};
             moves.push_back(move);
@@ -523,16 +492,11 @@ void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
         Index neighbor = pos + NeighborOffsets[i];
         if (!IsValidIndex(neighbor)) continue;
         if (HasPieceAt(neighbor)) continue;
-        if (!CanSlide(pos, neighbor)) continue;
-
-        Move move = {piece, pos, neighbor};
-        moves.push_back(move);
+        if (!CanSlide(pos, static_cast<Direction>(i), SlideMode::Ground)) continue;
+        moves.push_back({piece, pos, neighbor});
     }
 
-    // Movimento 2: sposta un pezzo adiacente
-    std::vector<Index> emptyNeighbors;
-    GetEmptyNeighbors(pos, emptyNeighbors);
-
+    // Movimento 2: sposta un pezzo adiacente sopra il Pillbug e depositalo
     for (int i = 0; i < 6; i++)
     {
         Index neighborPos = pos + NeighborOffsets[i];
@@ -541,7 +505,7 @@ void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
 
         PieceName neighborPiece = GetPieceAt(neighborPos);
 
-        // Il pezzo deve essere in cima alla sua pila (stackHeight == 1)
+        // Il pezzo non deve essere in uno stack
         if (stackHeight[neighborPos] > 1) continue;
 
         // Il pezzo non deve essere nella lista cannotBeMoved
@@ -551,19 +515,20 @@ void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
         if (!CanMoveWithoutBreakingHive(neighborPiece)) continue;
 
         // Gate rule con altezze per la raccolta (neighborPos → pos)
-        if (!CanSlideWithHeight(neighborPos, pos)) continue;
+        if (!CanSlide(neighborPos, static_cast<Direction>(i), SlideMode::Beetle)) continue;
 
-        // Deposita il pezzo in ogni cella vuota adiacente alla Pillbug
-        for (Index dest : emptyNeighbors)
+        // Deposita il pezzo in ogni cella vuota adiacente al Pillbug
+        for (int j = 0; j < 6; j++)
         {
-            // Non può tornare nella sua posizione originale
+            Index dest = pos + NeighborOffsets[j];
+            if (!IsValidIndex(dest)) continue;
+            if (HasPieceAt(dest)) continue;
             if (dest == neighborPos) continue;
 
             // Gate rule con altezze per il deposito (pos → dest)
-            if (!CanSlideWithHeight(pos, dest)) continue;
+            if (!CanSlide(pos, static_cast<Direction>(j), SlideMode::Beetle)) continue;
 
-            Move move = {neighborPiece, neighborPos, dest};
-            moves.push_back(move);
+            moves.push_back({neighborPiece, neighborPos, dest});
         }
     }
 }
@@ -612,99 +577,29 @@ void Board::GetMosquitoMoves(PieceName piece, std::vector<Move>& moves) const
             default: break;
         }
     }
-    // Se processedTypes è tutto false, non è stata generata nessuna mossa
-    // (adiacente solo a Mosquito) — nessuna azione necessaria, moves resta vuoto
-}
-
-void Board::GetValidPlacements(Color color, std::vector<Move>& moves) const
-{
-    if (currentTurn == 0)
-    {
-        Move move = {PieceName::INVALID, NullIndex, BoardCenter};
-        moves.push_back(move);
-        return;
-    }
-
-    // Step 1: trova tutte le celle vuote adiacenti all'hive
-    bool candidateAdded[BoardSize];
-    memset(candidateAdded, 0, sizeof(candidateAdded));
-    std::vector<Index> candidates;
-
-    for (int p = 0; p < NumPieceNames; p++)
-    {
-        if (PieceInHand(static_cast<PieceName>(p))) continue;
-        Index pos = piecesPositions[p];
-
-        for (int i = 0; i < 6; i++)
-        {
-            Index neighbor = pos + NeighborOffsets[i];
-            if (!IsValidIndex(neighbor)) continue;
-            if (HasPieceAt(neighbor)) continue;
-            if (candidateAdded[neighbor]) continue;
-            candidateAdded[neighbor] = true;
-            candidates.push_back(neighbor);
-        }
-    }
-
-    // Step 2: filtra le celle valide
-    for (Index candidate : candidates)
-    {
-        bool adjacentToFriend = false;
-        bool adjacentToEnemy = false;
-
-        for (int j = 0; j < 6; j++)
-        {
-            Index n = candidate + NeighborOffsets[j];
-            if (!IsValidIndex(n)) continue;
-            if (!HasPieceAt(n)) continue;
-            if (GetColor(GetPieceAt(n)) == color)
-                adjacentToFriend = true;
-            else
-                adjacentToEnemy = true;
-        }
-
-        if (currentTurn == 1)
-        {
-            // Black turno 1: qualsiasi cella adiacente all'hive va bene
-            Move move = {PieceName::INVALID, NullIndex, candidate};
-            moves.push_back(move);
-        }
-        else
-        {
-            // Dal turno 2: adiacente ad amico, non adiacente a nemico
-            if (adjacentToFriend && !adjacentToEnemy)
-            {
-                Move move = {PieceName::INVALID, NullIndex, candidate};
-                moves.push_back(move);
-            }
-        }
-    }
+    // Se processedTypes è tutto false, non è stata generata nessuna mossa <-> adiacente solo a Mosquito, moves resta vuoto
 }
 
 void Board::GetValidMoves(std::vector<Move>& moves) const
 {
     moves.clear();
 
-    // Se la partita non è in corso, non ci sono mosse valide
+    // Gioco non in corso, nessuna mossa
     if (!GameInProgress(boardState)) return;
 
-    Color color = currentColor;
-
-    // Determina se la Regina del colore corrente è in gioco
-    PieceName queen = (color == Color::White) ? PieceName::wQ : PieceName::bQ;
+    PieceName queen = (currentColor == Color::White) ? PieceName::wQ : PieceName::bQ;
     bool queenInPlay = PieceInPlay(queen);
 
     // Regola della Regina: al quarto turno deve essere piazzata
-    // White gioca ai turni 0,2,4,6 — il quarto turno di White è il turno 6
-    // Black gioca ai turni 1,3,5,7 — il quarto turno di Black è il turno 7
-    int queenDeadline = (color == Color::White) ? 6 : 7;
+    // Bianco gioca ai turni 1,3,5,7 — quarto turno = 7
+    // Nero gioca ai turni 2,4,6,8 — quarto turno = 8
+    int queenDeadline = (currentColor == Color::White) ? 7 : 8;
     bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline);
 
     if (mustPlaceQueen)
     {
-        // L'unica mossa valida è piazzare la Regina
         std::vector<Move> placements;
-        GetValidPlacements(color, placements);
+        GetValidPlacements(currentColor, placements);
         for (Move& placement : placements)
         {
             Move move = {queen, NullIndex, placement.Destination};
@@ -713,15 +608,15 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
         return;
     }
 
-    // Piazzamento: per ogni pezzo in mano del colore corrente
+    // Piazzamento: combina ogni posizione valida con ogni pezzo in mano
     std::vector<Move> placements;
-    GetValidPlacements(color, placements);
+    GetValidPlacements(currentColor, placements);
     for (Move& placement : placements)
     {
         for (int p = 0; p < NumPieceNames; p++)
         {
             PieceName piece = static_cast<PieceName>(p);
-            if (GetColor(piece) != color) continue;
+            if (GetColor(piece) != currentColor) continue;
             if (!PieceInHand(piece)) continue;
             if (!PieceNameIsEnabledForGameType(piece, gameType)) continue;
 
@@ -737,7 +632,7 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
         for (int p = 0; p < NumPieceNames; p++)
         {
             PieceName piece = static_cast<PieceName>(p);
-            if (GetColor(piece) != color) continue;
+            if (GetColor(piece) != currentColor) continue;
             if (!PieceInPlay(piece)) continue;
             if (!PieceIsOnTop(piece)) continue;
             if (cannotBeMoved[piece]) continue;
@@ -765,4 +660,71 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     }
 }
 
+// SARA 27 FEB
+bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const
+{
+    // 1. Posizione deve essere Vuota 
+    if (HasPieceAt(pos)) return false;
+
+    // 2. CASI SPECIALI (Turno 1 e 2)
+    if (currentTurn <= 2) {
+        if (currentTurn == 1) return true; // Turno 1: metti dove vuoi
+        
+        // Turno 2: il Nero DEVE toccare il Bianco.
+        // Appena troviamo un vicino qualsiasi (che per forza è il Bianco), usciamo con true.
+        for (int offset : NeighborOffsets) {
+            Index neighbor = pos + offset;
+            if (IsValidIndex(neighbor) && HasPieceAt(neighbor)) return true; 
+        }
+        return false;
+    }
+
+    // 3. REGOLA GENERALE (Dal turno 3 in poi): Devo toccare almeno un mio pezzo e NESSUN pezzo avversario
+    bool foundFriend = false;
+
+    for (int offset : NeighborOffsets) {
+        Index neighbor = pos + offset;
+
+        // Bounds check: ignora celle fuori dalla board
+        if (!IsValidIndex(neighbor)) continue;
+
+        PieceName neighborPiece = GetPieceAt(neighbor);
+        
+        if (neighborPiece != PieceName::INVALID) {
+            // Appena tocchiamo un pezzo nemico, la mossa è illegale!
+            if (GetColor(neighborPiece) != myColor) {
+                return false; 
+            }
+            // Se non è nemico, è per forza amico. Ce lo segniamo.
+            foundFriend = true;
+        }
+    }
+
+    return foundFriend;
 }
+
+void Board::GetValidPlacements(Color color, std::vector<Move>& moves) const
+{
+    bool candidateAdded[BoardSize];
+    memset(candidateAdded, 0, sizeof(candidateAdded));
+
+    for (int p = 0; p < NumPieceNames; p++)
+    {
+        if (PieceInHand(static_cast<PieceName>(p))) continue;               // cerchiamo i pezzi già sulla board
+
+        Index pos = piecesPositions[p];
+
+        for (int i = 0; i < 6; i++)
+        {
+            Index neighbor = pos + NeighborOffsets[i];
+            if (!IsValidIndex(neighbor)) continue;
+            if (candidateAdded[neighbor]) continue;
+            if (!CanPlaceAt(neighbor, color, currentTurn)) continue;
+
+            candidateAdded[neighbor] = true;
+            moves.push_back({PieceName::INVALID, NullIndex, neighbor});
+        }
+    }
+}
+
+} // namespace HiveGotThis

@@ -40,8 +40,8 @@ class Board
         // Colore del giocatore attuale. Inizia il bianco
         Color currentColor = Color::White;
 
-        // Il turno aumenta di uno a ogni mossa. Turno pari: bianco, turno dispari: nero
-        int currentTurn = 0;
+        // Il turno aumenta di uno a ogni mossa. Turno dispari: bianco, turno pari: nero
+        int currentTurn = 1;
 
         // Pezzi che per questo turno non possono essere mossi
         bool cannotBeMoved[NumPieceNames];
@@ -99,18 +99,24 @@ class Board
         
         // Restituisce gli indici dei vicini vuoti di una posizione
         void GetEmptyNeighbors(Index pos, std::vector<Index>& result) const;
-        
-        // Restituisce la direzione da from a to (-1 se non adiacenti)
-        int GetDirection(Index from, Index to) const;
-        
-        // Sliding piano → piano: gate rule + contact rule
-        bool CanSlide(Index from, Index to) const;
-        
-        // Sliding con altezze: solo gate rule con altezze (Beetle, Ladybug)
-        bool CanSlideWithHeight(Index from, Index to) const;
-        
-        // Espande un singolo passo di sliding da from, escludendo celle già visitate
-        void GetOneSlideSteps(Index from, bool visited[], std::vector<Index>& result) const;
+
+        // true se un pezzo si può spostare dalla posizione pos in direzione dir, muovendosi sullo stesso piano (Ground) o spostandosi di piano (Beetle)
+        bool Board::CanSlide(Index pos, Direction dir, SlideMode mode) const;
+
+        // SARA 27 FEB
+        //PER FUNZIONE CAN SLIDE: Pre-calcoliamo le "slide gates" per ogni direzione, ovvero le due posizioni che devono essere libere per poter scivolare in quella direzione
+        // Lookup table: Direction -> {gate_offset_1, gate_offset_2}
+        static constexpr Index SlideGates[6][2] = {
+            { NeighborOffsets[5], NeighborOffsets[1] }, // Right (0)
+            { NeighborOffsets[0], NeighborOffsets[2] }, // DownRight (1)
+            { NeighborOffsets[1], NeighborOffsets[3] }, // DownLeft (2)
+            { NeighborOffsets[2], NeighborOffsets[4] }, // Left (3)
+            { NeighborOffsets[3], NeighborOffsets[5] }, // UpLeft (4)
+            { NeighborOffsets[4], NeighborOffsets[0] }  // UpRight (5)
+        };
+
+        // Restituisce gli indici dei vicini verso i quali si può spostare, eccetto quelli già visitati
+        void Board::GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result) const;
 
 
 
@@ -118,6 +124,9 @@ class Board
 
         // Genera tutte le mosse valide per il colore corrente
         void GetValidMoves(std::vector<Move>& moves) const;
+
+        // Piazzamento: al turno corrente, true se è possibile piazzare in una determinata posizione
+        bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const;
 
         // Piazzamento: celle vuote adiacenti all'hive, non adiacenti a pezzi avversari
         void GetValidPlacements(Color color, std::vector<Move>& moves) const;
@@ -140,7 +149,7 @@ class Board
         Board(GameType gameType);
 
 
-        
+
         // - - - - - - - - - - ZOBRIST HASHING - - - - - - - - - -
         // Zobrist Hashing: modo per rappresentare lo stato completo di una board di gioco con un numero a 64 bit
 
