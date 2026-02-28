@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/TestZobristHash2.dir/src/TestZobristHash2.cpp.o -o TestZobristHash2  libhive_core.a

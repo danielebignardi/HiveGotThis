@@ -90,6 +90,12 @@ enum class Direction : uint8_t
     INVALID = 255
 };
 
+enum class SlideMode : uint8_t
+{
+    Ground,
+    Beetle
+};
+
 
 std::string GetEnumString(Color const &value);
 std::string GetEnumString(PieceName const &value);

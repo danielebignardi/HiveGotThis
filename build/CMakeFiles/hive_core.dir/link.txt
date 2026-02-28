@@ -1,0 +1,2 @@
+/usr/bin/ar qc libhive_core.a CMakeFiles/hive_core.dir/src/Board.cpp.o CMakeFiles/hive_core.dir/src/Enums.cpp.o CMakeFiles/hive_core.dir/src/Move.cpp.o
+/usr/bin/ranlib libhive_core.a
