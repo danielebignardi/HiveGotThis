@@ -25,7 +25,7 @@ static bool IsAdjacentTo(Index from, Index to)
 
 
 
-// - - - - - - - - - - MOVEMENT TESTS - - - - - - - - - -
+// - - - - - - - - - - TEST SINGOLI INSETTI - - - - - - - - - -
 
 // QueenBee scivola di 1 passo lungo l'hive
 // Setup: wQ al centro, bQ a destra -> wQ può andare solo a DownRight e UpRight
@@ -183,20 +183,36 @@ void TestMosquitoMoves()
               mosquitoMoves.size() == queenLikeMoves.size());
 }
 
-
+// - - - - - - - - - - TEST CONFIGURAZIONE - - - - - - - - - -
+void testEmptyBoard()
+{
+    Board board(GameType::BaseMLP);
+    board.boardState = BoardState::InProgress;
+    
+    std::vector<Move> moves;
+    board.GetValidMoves(moves);
+    for (Move move : moves)
+    {
+        std::cout << move << '\n';
+    }
+}
 
 int main()
 {
     Board::InitializeZobristTable();
 
-    TestQueenBeeMoves();
-    TestBeetleMoves();
-    TestGrasshopperMoves();
-    TestSpiderMoves();
-    TestSoldierAntMoves();
-    TestLadybugMoves();
-    TestPillbugMoves();
-    TestMosquitoMoves();
+    //TestQueenBeeMoves();
+    //TestBeetleMoves();
+    //TestGrasshopperMoves();
+    //TestSpiderMoves();
+    //TestSoldierAntMoves();
+    //TestLadybugMoves();
+    //TestPillbugMoves();
+    //TestMosquitoMoves();
+
+    testEmptyBoard();
+
+
 
     return 0;
 }

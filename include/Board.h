@@ -41,7 +41,7 @@ class Board
         Color currentColor = Color::White;
 
         // Il turno aumenta di uno a ogni mossa. Turno dispari: bianco, turno pari: nero
-        int currentTurn = 1;
+        int currentTurn = 0;
 
         // Pezzi che per questo turno non possono essere mossi
         bool cannotBeMoved[NumPieceNames];

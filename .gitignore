@@ -39,3 +39,9 @@
 
 # debug information files
 *.dwo
+
+# File system folder
+.DS_Store
+
+# Executable files
+build/

@@ -1,4 +1,5 @@
 #include <cstring>
+#include <ostream>
 #include <sstream>
 #include <string>
 
@@ -7,6 +8,12 @@
 
 namespace HiveGotThis
 {
+std::ostream& operator<<(std::ostream& os, const Move& move)
+{
+    os << GetEnumString(move.Piece) << move.Source << move.Destination;
+    return os;
+}
+
 bool operator==(Move const &lhs, Move const &rhs)
 {
     return lhs.Piece == rhs.Piece && lhs.Source == rhs.Source && lhs.Destination == rhs.Destination;
@@ -42,8 +49,7 @@ size_t hash(Move const &move)
     return h;
 }
 
-std::string BuildMoveString(bool &isPass, PieceName &startPiece, char &beforeSeperator, PieceName &endPiece,
-                            char &afterSeperator)
+std::string BuildMoveString(bool &isPass, PieceName &startPiece, char &beforeSeperator, PieceName &endPiece, char &afterSeperator)
 {
     if (isPass)
     {
@@ -92,8 +98,7 @@ bool TryNormalizeMoveString(std::string const &moveString, std::string &result)
     return false;
 }
 
-bool TryNormalizeMoveString(std::string const &moveString, bool &isPass, PieceName &startPiece, char &beforeSeperator,
-                            PieceName &endPiece, char &afterSeperator)
+bool TryNormalizeMoveString(std::string const &moveString, bool &isPass, PieceName &startPiece, char &beforeSeperator, PieceName &endPiece, char &afterSeperator)
 {
     isPass = false;
     startPiece = PieceName::INVALID;

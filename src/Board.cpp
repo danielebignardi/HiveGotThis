@@ -226,8 +226,6 @@ bool Board::IsOneHive(Index ignorePos) const
 
 // - - - - - - - - - - FUNZIONI DI UTILITÀ PER LA GENERAZIONE DELLE MOSSE - - - - - - - - - -
 
-// SARA 27 FEB
-// FREEDOM OF MOVEMENT RULE
 bool Board::CanSlide(Index pos, Direction dir, SlideMode mode) const
 {
     uint8_t d = static_cast<uint8_t>(dir);
@@ -591,9 +589,9 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     bool queenInPlay = PieceInPlay(queen);
 
     // Regola della Regina: al quarto turno deve essere piazzata
-    // Bianco gioca ai turni 1,3,5,7 — quarto turno = 7
-    // Nero gioca ai turni 2,4,6,8 — quarto turno = 8
-    int queenDeadline = (currentColor == Color::White) ? 7 : 8;
+    // Bianco gioca ai turni 0,2,4,6 — quarto turno = 6
+    // Nero gioca ai turni 1,3,5,6 — quarto turno = 7
+    int queenDeadline = (currentColor == Color::White) ? 6 : 7;
     bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline);
 
     if (mustPlaceQueen)
@@ -660,21 +658,20 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     }
 }
 
-// SARA 27 FEB
 bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const
 {
     // 1. Posizione deve essere Vuota 
     if (HasPieceAt(pos)) return false;
 
-    // 2. CASI SPECIALI (Turno 1 e 2)
-    if (currentTurn <= 2) {
-        if (currentTurn == 1) return true; // Turno 1: metti dove vuoi
-        
-        // Turno 2: il Nero DEVE toccare il Bianco.
+    // 2. CASI SPECIALI (Turno 0 e 1)
+    if (currentTurn == 0) return pos == BoardCenter; // Turno 0: il Bianco mette solo al centro
+
+    if (currentTurn == 1) {
+        // Turno 1: il Nero DEVE toccare il Bianco.
         // Appena troviamo un vicino qualsiasi (che per forza è il Bianco), usciamo con true.
         for (int offset : NeighborOffsets) {
             Index neighbor = pos + offset;
-            if (IsValidIndex(neighbor) && HasPieceAt(neighbor)) return true; 
+            if (IsValidIndex(neighbor) && HasPieceAt(neighbor)) return true;
         }
         return false;
     }
@@ -705,6 +702,13 @@ bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const
 
 void Board::GetValidPlacements(Color color, std::vector<Move>& moves) const
 {
+    // Turno 0: board vuota, l'unica posizione valida è BoardCenter
+    if (currentTurn == 0)
+    {
+        moves.push_back({PieceName::INVALID, NullIndex, BoardCenter});
+        return;
+    }
+
     bool candidateAdded[BoardSize];
     memset(candidateAdded, 0, sizeof(candidateAdded));
 
