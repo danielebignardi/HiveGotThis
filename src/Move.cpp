@@ -8,9 +8,10 @@
 
 namespace HiveGotThis
 {
+
 std::ostream& operator<<(std::ostream& os, const Move& move)
 {
-    os << GetEnumString(move.Piece) << move.Source << move.Destination;
+    os << GetEnumString(move.Piece) << ":" << move.Source << "->" << move.Destination;
     return os;
 }
 

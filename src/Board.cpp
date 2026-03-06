@@ -226,7 +226,7 @@ bool Board::IsOneHive(Index ignorePos) const
 
 // - - - - - - - - - - FUNZIONI DI UTILITÀ PER LA GENERAZIONE DELLE MOSSE - - - - - - - - - -
 
-bool Board::CanSlide(Index pos, Direction dir, SlideMode mode) const
+bool Board::CanSlide(Index pos, Direction dir, SlideMode mode, Index ignorePos) const
 {
     uint8_t d = static_cast<uint8_t>(dir);
     Index gate1 = pos + SlideGates[d][0];
@@ -241,8 +241,8 @@ bool Board::CanSlide(Index pos, Direction dir, SlideMode mode) const
     }
 
     // SlideMode::Ground — pezzi a terra
-    bool g1 = HasPieceAt(gate1);
-    bool g2 = HasPieceAt(gate2);
+    bool g1 = HasPieceAt(gate1) && (gate1 != ignorePos);
+    bool g2 = HasPieceAt(gate2) && (gate2 != ignorePos);
     if (g1 && g2) return false;
     return g1 || g2;
 }
@@ -267,7 +267,7 @@ void Board::GetEmptyNeighbors(Index pos, std::vector<Index>& result) const
     }
 }
 
-void Board::GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result) const
+void Board::GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result, Index ignorePos) const
 {
     for (int i = 0; i < 6; i++)
     {
@@ -275,7 +275,7 @@ void Board::GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::ve
         if (!IsValidIndex(neighbor)) continue;
         if (mode == SlideMode::Ground && HasPieceAt(neighbor)) continue;    // se siamo in modalità Ground allora saltiamo le celle su cui c'è già un pezzo
         if (visited[neighbor]) continue;
-        if (!CanSlide(from, static_cast<Direction>(i), mode)) continue;
+        if (!CanSlide(from, static_cast<Direction>(i), mode, ignorePos)) continue;
         result.push_back(neighbor);
     }
 }
@@ -366,21 +366,21 @@ void Board::GetSpiderMoves(PieceName piece, std::vector<Move>& moves) const
 
     // inizio: indici raggiungibili dopo un passo
     visited[pos] = true;
-    GetOneSlideSteps(pos, SlideMode::Ground, visited, steps1);
+    GetOneSlideSteps(pos, SlideMode::Ground, visited, steps1, pos);
 
-    for (Index step1 : steps1)      
+    for (Index step1 : steps1)
     {
         visited[step1] = true;
 
-        steps2.clear();                     
-        GetOneSlideSteps(step1, SlideMode::Ground, visited, steps2);
+        steps2.clear();
+        GetOneSlideSteps(step1, SlideMode::Ground, visited, steps2, pos);
 
         for (Index step2 : steps2)
         {
             visited[step2] = true;
 
             steps3.clear();
-            GetOneSlideSteps(step2, SlideMode::Ground, visited, steps3);
+            GetOneSlideSteps(step2, SlideMode::Ground, visited, steps3, pos);
 
             for (Index step3 : steps3)
             {
@@ -408,14 +408,14 @@ void Board::GetSoldierAntMoves(PieceName piece, std::vector<Move>& moves) const
 
     // Posizioni visitabili, iniziamo a riempirle con i vicini
     std::vector<Index> queue;
-    GetOneSlideSteps(pos, SlideMode::Ground, visited, queue);
+    GetOneSlideSteps(pos, SlideMode::Ground, visited, queue, pos);
     for (Index cell : queue) visited[cell] = true;
 
     int head = 0;
     while (head < (int)queue.size()) {
         Index current = queue[head++];
         int sizeBefore = queue.size();
-        GetOneSlideSteps(current, SlideMode::Ground, visited, queue);
+        GetOneSlideSteps(current, SlideMode::Ground, visited, queue, pos);
 
         // Segna subito come visitati i nuovi nodi aggiunti
         for (int i = sizeBefore; i < (int)queue.size(); i++)
@@ -585,31 +585,26 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     // Gioco non in corso, nessuna mossa
     if (!GameInProgress(boardState)) return;
 
-    PieceName queen = (currentColor == Color::White) ? PieceName::wQ : PieceName::bQ;
-    bool queenInPlay = PieceInPlay(queen);
-
     // Regola della Regina: al quarto turno deve essere piazzata
     // Bianco gioca ai turni 0,2,4,6 — quarto turno = 6
     // Nero gioca ai turni 1,3,5,6 — quarto turno = 7
-    int queenDeadline = (currentColor == Color::White) ? 6 : 7;
-    bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline);
+    PieceName queen = (currentColor == Color::White) ? PieceName::wQ : PieceName::bQ;   // chi è la regina in questione a seconda del turno
+    bool queenInPlay = PieceInPlay(queen);
+    int queenDeadline = (currentColor == Color::White) ? 6 : 7;             // turno entro il quale la regina in questione deve essere piazzata
+    bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline); 
+
+    std::vector<Index> positions;
+    GetValidPlacements(currentColor, positions);
 
     if (mustPlaceQueen)
     {
-        std::vector<Move> placements;
-        GetValidPlacements(currentColor, placements);
-        for (Move& placement : placements)
-        {
-            Move move = {queen, NullIndex, placement.Destination};
-            moves.push_back(move);
-        }
+        for (Index dest : positions)
+            moves.push_back({queen, NullIndex, dest});
         return;
     }
 
     // Piazzamento: combina ogni posizione valida con ogni pezzo in mano
-    std::vector<Move> placements;
-    GetValidPlacements(currentColor, placements);
-    for (Move& placement : placements)
+    for (Index dest : positions)
     {
         for (int p = 0; p < NumPieceNames; p++)
         {
@@ -618,8 +613,19 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
             if (!PieceInHand(piece)) continue;
             if (!PieceNameIsEnabledForGameType(piece, gameType)) continue;
 
-            Move move = {piece, NullIndex, placement.Destination};
-            moves.push_back(move);
+            // Regola: la queenBee non può essere piazzata al primo turno del proprio colore
+            if (piece == queen && currentTurn <= 1) continue;
+
+            // Regola Mzinga: un pezzo numerato non può essere piazzato se il precedente è ancora in mano
+            // (es. non si può piazzare WS2 se WS1 non è ancora sulla board)
+            if (piece > 0) {
+                PieceName prev = static_cast<PieceName>(piece - 1);
+                if (GetColor(prev) == currentColor &&
+                    GetBugType(prev) == GetBugType(piece) &&
+                    PieceInHand(prev)) continue;
+            }
+
+            moves.push_back({piece, NullIndex, dest});
         }
     }
 
@@ -700,23 +706,26 @@ bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const
     return foundFriend;
 }
 
-void Board::GetValidPlacements(Color color, std::vector<Move>& moves) const
+// Mette in positions gli indici delle celle in cui il giocatore corrente può posizionare un pezzo
+
+void Board::GetValidPlacements(Color color, std::vector<Index>& positions) const
 {
     // Turno 0: board vuota, l'unica posizione valida è BoardCenter
     if (currentTurn == 0)
     {
-        moves.push_back({PieceName::INVALID, NullIndex, BoardCenter});
+        positions.push_back(BoardCenter);
         return;
     }
 
     bool candidateAdded[BoardSize];
     memset(candidateAdded, 0, sizeof(candidateAdded));
 
+    // logica: per ogni pezzo sulla board, vediamo quali tra i suoi 6 vicini sono liberi e quelli liberi saranno validi
     for (int p = 0; p < NumPieceNames; p++)
     {
-        if (PieceInHand(static_cast<PieceName>(p))) continue;               // cerchiamo i pezzi già sulla board
+        if (PieceInHand(static_cast<PieceName>(p))) continue; // cerchiamo i pezzi già sulla board
 
-        Index pos = piecesPositions[p];
+        Index pos = piecesPositions[p]; // posizione del pezzo considerato
 
         for (int i = 0; i < 6; i++)
         {
@@ -726,7 +735,7 @@ void Board::GetValidPlacements(Color color, std::vector<Move>& moves) const
             if (!CanPlaceAt(neighbor, color, currentTurn)) continue;
 
             candidateAdded[neighbor] = true;
-            moves.push_back({PieceName::INVALID, NullIndex, neighbor});
+            positions.push_back(neighbor);
         }
     }
 }

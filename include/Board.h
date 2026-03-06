@@ -101,7 +101,8 @@ class Board
         void GetEmptyNeighbors(Index pos, std::vector<Index>& result) const;
 
         // true se un pezzo si può spostare dalla posizione pos in direzione dir, muovendosi sullo stesso piano (Ground) o spostandosi di piano (Beetle)
-        bool CanSlide(Index pos, Direction dir, SlideMode mode) const;
+        // ignorePos: posizione da trattare come vuota durante il controllo dei gate (usato per ignorare la posizione di partenza del pezzo in movimento)
+        bool CanSlide(Index pos, Direction dir, SlideMode mode, Index ignorePos = NullIndex) const;
 
         // SARA 27 FEB
         //PER FUNZIONE CAN SLIDE: Pre-calcoliamo le "slide gates" per ogni direzione, ovvero le due posizioni che devono essere libere per poter scivolare in quella direzione
@@ -116,7 +117,8 @@ class Board
         };
 
         // Restituisce gli indici dei vicini verso i quali si può spostare, eccetto quelli già visitati
-        void GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result) const;
+        // ignorePos: propagato a CanSlide per ignorare la posizione di partenza del pezzo in movimento
+        void GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result, Index ignorePos = NullIndex) const;
 
 
 
@@ -129,7 +131,7 @@ class Board
         bool CanPlaceAt(Index pos, Color myColor, int currentTurn) const;
 
         // Piazzamento: celle vuote adiacenti all'hive, non adiacenti a pezzi avversari
-        void GetValidPlacements(Color color, std::vector<Move>& moves) const;
+        void GetValidPlacements(Color color, std::vector<Index>& positions) const;
 
         // Movimenti per tipo di insetto
         void GetQueenBeeMoves(PieceName piece, std::vector<Move>& moves) const;     // Slide 1 passo
