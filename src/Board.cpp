@@ -704,7 +704,24 @@ bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const
 }
 
 void Board::GetValidPlacements(Color color, std::vector<Move>& moves) const
-{
+{   
+    // CASO SPECIALE: board vuota (primo piazzamento assoluto)
+    // Non ci sono pezzi sulla board da cui partire per trovare posizioni adiacenti,
+    // quindi l'unica posizione valida è il centro della board.
+    bool boardEmpty = true;
+    for (int p = 0; p < NumPieceNames; p++)
+    {
+        if (PieceInPlay(static_cast<PieceName>(p)))
+        {
+            boardEmpty = false;
+            break;
+        }
+    }
+    if (boardEmpty)
+    {
+        moves.push_back({PieceName::INVALID, NullIndex, BoardCenter});
+        return;
+    }
     bool candidateAdded[BoardSize];
     memset(candidateAdded, 0, sizeof(candidateAdded));
 
