@@ -257,4 +257,5 @@ bool IsPieceNameValid(PieceName p)
     return (p >= PieceName::wQ && p < PieceName::NumPieceNames);
 }
 
+
 }
