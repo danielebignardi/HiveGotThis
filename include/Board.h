@@ -55,6 +55,9 @@ class Board
         // Restituisce il pezzo in cima se c'è, altrimenti INVALID
         PieceName GetPieceAt(Index position) const;
 
+        // Restituisce il pezzo direttamente sotto a piece nella pila (INVALID se nessuno)
+        PieceName GetPieceUnder(PieceName piece) const;
+
         // true se c'è un pezzo alla determinata posizione
         bool HasPieceAt(Index position) const;
         
@@ -79,6 +82,10 @@ class Board
         
         // Muove un pezzo da dov'è a newPosition (PopAt + PushAt)
         void MovePiece(PieceName pieceName, Index newPosition);
+
+        // Da chiamare dopo ogni mossa/piazzamento: aggiorna cannotBeMoved, currentTurn, currentColor.
+        // Sarà chiamata da PlayMove() (engine ufficiale) e per ora anche da playMove() nei test.
+        void ApplyTurnEffects(PieceName movedPiece);
         
 
 
@@ -210,6 +217,11 @@ inline PieceName Board::GetPieceAt(Index position) const
 {
     assert(IsValidIndex(position) && "GetPieceAt chiamato con indice invalido!");
     return cells[position];
+}
+
+inline PieceName Board::GetPieceUnder(PieceName piece) const
+{
+    return below[piece];
 }
 
 inline bool Board::HasPieceAt(Index position) const

@@ -93,7 +93,8 @@ enum class Direction : uint8_t
 enum class SlideMode : uint8_t
 {
     Ground,
-    Beetle
+    Beetle,
+    LadyBug  // come Beetle ma con stackHeight[pos]+1 (usato per la discesa al passo 3)
 };
 
 

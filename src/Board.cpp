@@ -1,6 +1,7 @@
 #include "Board.h"
 #include <iterator>
 #include <algorithm>
+#include <unordered_set>
 #include <random>
 #include <iostream>
 
@@ -94,6 +95,18 @@ void Board::MovePiece(PieceName pieceName, Index newPosition)
     }
     
     PushAt(pieceName, newPosition);
+}
+
+
+
+void Board::ApplyTurnEffects(PieceName movedPiece)
+{
+    // Il pezzo mosso/piazzato non può essere spostato dal Pillbug nel turno successivo
+    memset(cannotBeMoved, 0, sizeof(cannotBeMoved));
+    cannotBeMoved[movedPiece] = true;
+
+    currentColor = static_cast<Color>((static_cast<int>(currentColor) + 1) % 2);
+    currentTurn++;
 }
 
 
@@ -235,7 +248,25 @@ bool Board::CanSlide(Index pos, Direction dir, SlideMode mode, Index ignorePos) 
     if (mode == SlideMode::Beetle)
     {
         Index dest    = pos + NeighborOffsets[d];
-        int maxHeight = std::max((int)stackHeight[pos], (int)stackHeight[dest]);
+        // Il Beetle sale sopra dest → la quota effettiva di arrivo è stackHeight[dest]+1
+        int maxHeight = std::max((int)stackHeight[pos], (int)stackHeight[dest] + 1);
+        int minGate   = std::min((int)stackHeight[gate1], (int)stackHeight[gate2]);
+        if (minGate >= maxHeight) return false;
+
+        // Beetle a terra (pos h=1, dest vuota): almeno un gate occupato, stessa regola di Ground mode.
+        // Un Beetle elevato (h>1) può scendere su celle vuote anche con gate vuoti — è già sopra di essi.
+        if (stackHeight[pos] == 1 && stackHeight[dest] == 0 &&
+            stackHeight[gate1] == 0 && stackHeight[gate2] == 0)
+            return false;
+
+        return true;
+    }
+
+    if (mode == SlideMode::LadyBug)
+    {
+        // La Ladybug è fisicamente sopra il pezzo a pos, quindi altezza effettiva = stackHeight[pos] + 1
+        Index dest    = pos + NeighborOffsets[d];
+        int maxHeight = std::max((int)stackHeight[pos] + 1, (int)stackHeight[dest]);
         int minGate   = std::min((int)stackHeight[gate1], (int)stackHeight[gate2]);
         return minGate < maxHeight;
     }
@@ -470,7 +501,7 @@ void Board::GetLadybugMoves(PieceName piece, std::vector<Move>& moves) const
             if (!IsValidIndex(neighbor)) continue;
             if (HasPieceAt(neighbor)) continue;
             if (neighbor == pos) continue;
-            if (!CanSlide(step2, static_cast<Direction>(i), SlideMode::Ground)) continue;
+            if (!CanSlide(step2, static_cast<Direction>(i), SlideMode::LadyBug)) continue;
 
             Move move = {piece, pos, neighbor};
             moves.push_back(move);
@@ -480,21 +511,23 @@ void Board::GetLadybugMoves(PieceName piece, std::vector<Move>& moves) const
 
 void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
 {
-    if (!CanMoveWithoutBreakingHive(piece)) return;
-
     Index pos = piecesPositions[piece];
 
-    // Movimento 1: slide di 1 passo come la Queen Bee
-    for (int i = 0; i < 6; i++)
+    // Movimento 1: slide di 1 passo come la Queen Bee (richiede che il Pillbug non rompa l'hive)
+    if (CanMoveWithoutBreakingHive(piece))
     {
-        Index neighbor = pos + NeighborOffsets[i];
-        if (!IsValidIndex(neighbor)) continue;
-        if (HasPieceAt(neighbor)) continue;
-        if (!CanSlide(pos, static_cast<Direction>(i), SlideMode::Ground)) continue;
-        moves.push_back({piece, pos, neighbor});
+        for (int i = 0; i < 6; i++)
+        {
+            Index neighbor = pos + NeighborOffsets[i];
+            if (!IsValidIndex(neighbor)) continue;
+            if (HasPieceAt(neighbor)) continue;
+            if (!CanSlide(pos, static_cast<Direction>(i), SlideMode::Ground)) continue;
+            moves.push_back({piece, pos, neighbor});
+        }
     }
 
     // Movimento 2: sposta un pezzo adiacente sopra il Pillbug e depositalo
+    // (la special ability funziona anche se il Pillbug è pinnato)
     for (int i = 0; i < 6; i++)
     {
         Index neighborPos = pos + NeighborOffsets[i];
@@ -513,7 +546,8 @@ void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
         if (!CanMoveWithoutBreakingHive(neighborPiece)) continue;
 
         // Gate rule con altezze per la raccolta (neighborPos → pos)
-        if (!CanSlide(neighborPos, static_cast<Direction>(i), SlideMode::Beetle)) continue;
+        // La direzione corretta è l'opposta di i: il vicino si muove VERSO il Pillbug
+        if (!CanSlide(neighborPos, static_cast<Direction>((i + 3) % 6), SlideMode::Beetle)) continue;
 
         // Deposita il pezzo in ogni cella vuota adiacente al Pillbug
         for (int j = 0; j < 6; j++)
@@ -524,7 +558,8 @@ void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
             if (dest == neighborPos) continue;
 
             // Gate rule con altezze per il deposito (pos → dest)
-            if (!CanSlide(pos, static_cast<Direction>(j), SlideMode::Beetle)) continue;
+            // Il Pillbug porta un pezzo sopra di sé: altezza effettiva = stackHeight[pos]+1 → LadyBug
+            if (!CanSlide(pos, static_cast<Direction>(j), SlideMode::LadyBug)) continue;
 
             moves.push_back({neighborPiece, neighborPos, dest});
         }
@@ -655,6 +690,16 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
                 default: break;
             }
         }
+    }
+
+    // DEDUPLICAZIONE: alcune funzioni (Ladybug, Mosquito+Pillbug) possono generare la stessa mossa più volte.
+    // Sort + unique richiede che i duplicati siano adiacenti.
+    {
+        std::unordered_set<size_t> seen;
+        auto it = std::remove_if(moves.begin(), moves.end(), [&](const Move& m) {
+            return !seen.insert(hash(m)).second;
+        });
+        moves.erase(it, moves.end());
     }
 
     // Se non ci sono mosse valide, l'unica opzione è passare

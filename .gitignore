@@ -45,3 +45,10 @@
 
 # Executable files
 build/
+
+# Files to obtain the test strings
+editMzingaMovesString
+editMzingaMovesString.cpp
+comandi_esecuzione.txt
+mosseDaEditare.txt
+TODO.txt
