@@ -2,6 +2,17 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+
+// questi include servono solo per interagire con MzingaEngine
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <cstring>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <unordered_map>
+
 using namespace HiveGotThis;
 
 void CheckTest(const std::string& testName, bool passed)
@@ -248,41 +259,51 @@ std::vector<std::string> GetAllUHPRepresentations(const Board& board, const Move
     return result;
 }
 
-void CheckValidMoves(const Board& board, const std::string& message, const std::string& mzingaMoves) {
-
-    std::cout << message << '\n';
-    //std::cout << "mzinga moves: " << mzingaMoves << '\n';
+void CheckValidMoves(const Board& board, const std::string& message, const std::string& mzingaMoves, bool verbose = true) {
 
     std::vector<Move> moves;
     board.GetValidMoves(moves);
-    
-    // conteggio delle mosse
+
     int ourCount = moves.size();
     int mzingaCount = std::count(mzingaMoves.begin(), mzingaMoves.end(), ';');
-    std::cout << ourCount << " our valid moves" << '\n';
-    std::cout << mzingaCount << " mzinga valid moves" << '\n';    
 
-    // le nostre mosse devono essere tra quelle di mzinga
+    if (verbose) {
+        std::cout << message << '\n';
+        std::cout << ourCount << " our / " << mzingaCount << " mzinga\n";
+    }
+
     for (Move move : moves)
     {
         auto reps = GetAllUHPRepresentations(board, move);
         bool found = false;
         for (const std::string& rep : reps)
             if (mzingaMoves.find(rep + ";") != std::string::npos) { found = true; break; }
-        
-        std::stringstream ss;
-        ss << move;
 
-        std::cout << std::left          
-          << std::setw(25) << ss.str() 
-          << std::setw(25) << reps[0] 
-          << found << '\n';
+        if (verbose) {
+            std::stringstream ss;
+            ss << move;
+            std::cout << std::left
+              << std::setw(25) << ss.str()
+              << std::setw(25) << reps[0]
+              << found << '\n';
+        } else if (!found) {
+            // In modalità silenziosa stampa contesto solo in caso di failure
+            std::stringstream ss;
+            ss << move;
+            std::cout << "\nFAIL: " << message << '\n';
+            std::cout << ourCount << " our / " << mzingaCount << " mzinga\n";
+            std::cout << ss.str() << " -> " << reps[0] << " not found\n" << std::flush;
+        }
 
         assert(found);
     }
-    std::cout << '\n';
-    moves.clear();
 
+    if (verbose) std::cout << '\n';
+
+    if (!verbose && ourCount != mzingaCount) {
+        std::cout << "\nFAIL: " << message << '\n';
+        std::cout << ourCount << " our / " << mzingaCount << " mzinga\n" << std::flush;
+    }
     assert(ourCount == mzingaCount);
 }
 
@@ -300,42 +321,55 @@ void testGame48Moves()
 
     CheckValidMoves(board, "\nEMPTY BOARD", "wS1;wB1;wG1;wA1;wM;wL;wP;");
 
+    // wS1:-1->8256             wS1                          1
     playMove(board, wS1, 8256);
     CheckValidMoves(board, "\nEXECUTED wS1", "bS1 \\wS1;bS1 wS1/;bS1 wS1-;bS1 wS1\\;bS1 /wS1;bS1 -wS1;bB1 \\wS1;bB1 wS1/;bB1 wS1-;bB1 wS1\\;bB1 /wS1;bB1 -wS1;bG1 \\wS1;bG1 wS1/;bG1 wS1-;bG1 wS1\\;bG1 /wS1;bG1 -wS1;bA1 \\wS1;bA1 wS1/;bA1 wS1-;bA1 wS1\\;bA1 /wS1;bA1 -wS1;bM \\wS1;bM wS1/;bM wS1-;bM wS1\\;bM /wS1;bM -wS1;bL \\wS1;bL wS1/;bL wS1-;bL wS1\\;bL /wS1;bL -wS1;bP \\wS1;bP wS1/;bP wS1-;bP wS1\\;bP /wS1;bP -wS1;");
 
+    // bB1:-1->8129             bB1 /wS1                     1
     playMove(board, bB1, 8129);
     CheckValidMoves(board, "\nEXECUTED bB1 /wS1", "wQ \\wS1;wQ wS1/;wQ wS1-;wS2 \\wS1;wS2 wS1/;wS2 wS1-;wB1 \\wS1;wB1 wS1/;wB1 wS1-;wG1 \\wS1;wG1 wS1/;wG1 wS1-;wA1 \\wS1;wA1 wS1/;wA1 wS1-;wM \\wS1;wM wS1/;wM wS1-;wL \\wS1;wL wS1/;wL wS1-;wP \\wS1;wP wS1/;wP wS1-;");
 
+    // wG1:-1->8383             wG1 wS1/                     1
     playMove(board, wG1, 8383);
     CheckValidMoves(board, "\nEXECUTED wG1 wS1/", "bQ bB1\\;bQ /bB1;bQ -bB1;bS1 bB1\\;bS1 /bB1;bS1 -bB1;bB2 bB1\\;bB2 /bB1;bB2 -bB1;bG1 bB1\\;bG1 /bB1;bG1 -bB1;bA1 bB1\\;bA1 /bB1;bA1 -bB1;bM bB1\\;bM /bB1;bM -bB1;bL bB1\\;bL /bB1;bL -bB1;bP bB1\\;bP /bB1;bP -bB1;");
 
+    // bA1:-1->8002             bA1 /bB1                     1
     playMove(board, bA1, 8002);
     CheckValidMoves(board, "EXECTUED bA1 /bB1", "wQ -wG1;wQ wG1\\;wQ \\wG1;wQ wG1/;wQ wG1-;wS2 -wG1;wS2 wG1\\;wS2 \\wG1;wS2 wG1/;wS2 wG1-;wB1 -wG1;wB1 wG1\\;wB1 \\wG1;wB1 wG1/;wB1 wG1-;wG2 -wG1;wG2 wG1\\;wG2 \\wG1;wG2 wG1/;wG2 wG1-;wA1 -wG1;wA1 wG1\\;wA1 \\wG1;wA1 wG1/;wA1 wG1-;wM -wG1;wM wG1\\;wM \\wG1;wM wG1/;wM wG1-;wL -wG1;wL wG1\\;wL \\wG1;wL wG1/;wL wG1-;wP -wG1;wP wG1\\;wP \\wG1;wP wG1/;wP wG1-;");
 
+    // wQ:-1->8382              wQ wG1-                      1
     playMove(board, wQ, 8382);
     CheckValidMoves(board, "EXECUTED wQ wG1-", "bQ bB1\\;bQ -bB1;bQ bA1\\;bQ /bA1;bQ -bA1;bS1 bB1\\;bS1 -bB1;bS1 bA1\\;bS1 /bA1;bS1 -bA1;bB2 bB1\\;bB2 -bB1;bB2 bA1\\;bB2 /bA1;bB2 -bA1;bG1 bB1\\;bG1 -bB1;bG1 bA1\\;bG1 /bA1;bG1 -bA1;bA2 bB1\\;bA2 -bB1;bA2 bA1\\;bA2 /bA1;bA2 -bA1;bM bB1\\;bM -bB1;bM bA1\\;bM /bA1;bM -bA1;bL bB1\\;bL -bB1;bL bA1\\;bL /bA1;bL -bA1;bP bB1\\;bP -bB1;bP bA1\\;bP /bA1;bP -bA1;");
 
+    // bM:-1->7875              bM /bA1                      1
     playMove(board, bM, 7875);
     CheckValidMoves(board, "EXECUTED bM /bA1", "wQ wG1/;wQ wG1\\;wS2 \\wQ;wS2 wQ/;wS2 wQ-;wS2 wQ\\;wS2 wG1\\;wS2 -wG1;wS2 \\wG1;wB1 \\wQ;wB1 wQ/;wB1 wQ-;wB1 wQ\\;wB1 wG1\\;wB1 -wG1;wB1 \\wG1;wG2 \\wQ;wG2 wQ/;wG2 wQ-;wG2 wQ\\;wG2 wG1\\;wG2 -wG1;wG2 \\wG1;wA1 \\wQ;wA1 wQ/;wA1 wQ-;wA1 wQ\\;wA1 wG1\\;wA1 -wG1;wA1 \\wG1;wM \\wQ;wM wQ/;wM wQ-;wM wQ\\;wM wG1\\;wM -wG1;wM \\wG1;wL \\wQ;wL wQ/;wL wQ-;wL wQ\\;wL wG1\\;wL -wG1;wL \\wG1;wP \\wQ;wP wQ/;wP wQ-;wP wQ\\;wP wG1\\;wP -wG1;wP \\wG1;");
 
+    // wP:-1->8384              wP \wS1                      1
     playMove(board, wP, 8384);
     CheckValidMoves(board, "EXECUTED wP \\wS1", "bQ bB1\\;bQ -bB1;bQ bA1\\;bQ -bA1;bQ bM\\;bQ /bM;bQ -bM;");
 
+    // bQ:-1->8130              bQ \bA1                      1
     playMove(board, bQ, 8130);
     CheckValidMoves(board, "EXECUTED bQ \\bA1", "wQ wG1/;wQ wG1\\;wS2 \\wQ;wS2 wQ/;wS2 wQ-;wS2 wQ\\;wS2 wG1\\;wS2 \\wG1;wS2 \\wP;wS2 -wP;wB1 \\wQ;wB1 wQ/;wB1 wQ-;wB1 wQ\\;wB1 wG1\\;wB1 \\wG1;wB1 \\wP;wB1 -wP;wG2 \\wQ;wG2 wQ/;wG2 wQ-;wG2 wQ\\;wG2 wG1\\;wG2 \\wG1;wG2 \\wP;wG2 -wP;wA1 \\wQ;wA1 wQ/;wA1 wQ-;wA1 wQ\\;wA1 wG1\\;wA1 \\wG1;wA1 \\wP;wA1 -wP;wM \\wQ;wM wQ/;wM wQ-;wM wQ\\;wM wG1\\;wM \\wG1;wM \\wP;wM -wP;wL \\wQ;wL wQ/;wL wQ-;wL wQ\\;wL wG1\\;wL \\wG1;wL \\wP;wL -wP;wP \\wG1;wP -wS1;");
 
+    // wA1:-1->8385             wA1 -wP                      1
     playMove(board, wA1, 8385);
     CheckValidMoves(board, "EXECUTED wA1 -wP", "bQ wA1\\;bQ -bA1;bS1 /bQ;bS1 -bQ;bS1 bB1\\;bS1 bA1\\;bS1 bM\\;bS1 /bM;bS1 -bM;bB2 /bQ;bB2 -bQ;bB2 bB1\\;bB2 bA1\\;bB2 bM\\;bB2 /bM;bB2 -bM;bG1 /bQ;bG1 -bQ;bG1 bB1\\;bG1 bA1\\;bG1 bM\\;bG1 /bM;bG1 -bM;bA2 /bQ;bA2 -bQ;bA2 bB1\\;bA2 bA1\\;bA2 bM\\;bA2 /bM;bA2 -bM;bM /bQ;bM -bQ;bM /wA1;bM -wA1;bM \\wA1;bM \\wP;bM \\wG1;bM \\wQ;bM wQ/;bM wQ-;bM wQ\\;bM wG1\\;bM wS1\\;bM bB1\\;bM bA1\\;bL /bQ;bL -bQ;bL bB1\\;bL bA1\\;bL bM\\;bL /bM;bL -bM;bP /bQ;bP -bQ;bP bB1\\;bP bA1\\;bP bM\\;bP /bM;bP -bM;");
 
+    // bL:-1->7748              bL /bM                       1
     playMove(board, bL, 7748);
     CheckValidMoves(board, "EXECUTED bL /bM", "wQ wG1/;wQ wG1\\;wS2 \\wQ;wS2 wQ/;wS2 wQ-;wS2 wQ\\;wS2 wG1\\;wS2 \\wG1;wS2 \\wA1;wS2 \\wP;wS2 -wA1;wB1 \\wQ;wB1 wQ/;wB1 wQ-;wB1 wQ\\;wB1 wG1\\;wB1 \\wG1;wB1 \\wA1;wB1 \\wP;wB1 -wA1;wG2 \\wQ;wG2 wQ/;wG2 wQ-;wG2 wQ\\;wG2 wG1\\;wG2 \\wG1;wG2 \\wA1;wG2 \\wP;wG2 -wA1;wA1 \\wP;wA1 \\wG1;wA1 \\wQ;wA1 wQ/;wA1 wQ-;wA1 wQ\\;wA1 wG1\\;wA1 wS1\\;wA1 bB1\\;wA1 bA1\\;wA1 bM\\;wA1 bL\\;wA1 /bL;wA1 -bL;wA1 -bM;wA1 /bQ;wA1 -bQ;wA1 \\bQ;wA1 /wP;wA2 \\wQ;wA2 wQ/;wA2 wQ-;wA2 wQ\\;wA2 wG1\\;wA2 \\wG1;wA2 \\wA1;wA2 \\wP;wA2 -wA1;wM \\wQ;wM wQ/;wM wQ-;wM wQ\\;wM wG1\\;wM \\wG1;wM \\wA1;wM \\wP;wM -wA1;wL \\wQ;wL wQ/;wL wQ-;wL wQ\\;wL wG1\\;wL \\wG1;wL \\wA1;wL \\wP;wL -wA1;");
 
+    // wA1:8385->8258           wA1 \bQ                      1
     playMove(board, wA1, 8258);
     CheckValidMoves(board, "EXECTUDED wA1 \\bQ", "bS1 /bQ;bS1 bB1\\;bS1 bA1\\;bS1 bM\\;bS1 -bM;bS1 bL\\;bS1 /bL;bS1 -bL;bB2 /bQ;bB2 bB1\\;bB2 bA1\\;bB2 bM\\;bB2 -bM;bB2 bL\\;bB2 /bL;bB2 -bL;bG1 /bQ;bG1 bB1\\;bG1 bA1\\;bG1 bM\\;bG1 -bM;bG1 bL\\;bG1 /bL;bG1 -bL;bA2 /bQ;bA2 bB1\\;bA2 bA1\\;bA2 bM\\;bA2 -bM;bA2 bL\\;bA2 /bL;bA2 -bL;bL bB1\\;bL bA1\\;bL /bQ;bP /bQ;bP bB1\\;bP bA1\\;bP bM\\;bP -bM;bP bL\\;bP /bL;bP -bL;");
 
+    // bA2:-1->7749             bA2 -bL                      1
     playMove(board, bA2, 7749);
     CheckValidMoves(board, "EXECUTED bA2 -bL", "wQ wG1/;wQ wG1\\;wS2 \\wQ;wS2 wQ/;wS2 wQ-;wS2 wQ\\;wS2 wG1\\;wS2 \\wG1;wS2 \\wA1;wS2 -wP;wS2 -wA1;wS2 \\wP;wB1 \\wQ;wB1 wQ/;wB1 wQ-;wB1 wQ\\;wB1 wG1\\;wB1 \\wG1;wB1 \\wA1;wB1 -wP;wB1 -wA1;wB1 \\wP;wG2 \\wQ;wG2 wQ/;wG2 wQ-;wG2 wQ\\;wG2 wG1\\;wG2 \\wG1;wG2 \\wA1;wG2 -wP;wG2 -wA1;wG2 \\wP;wA1 /wP;wA1 -wP;wA1 \\wP;wA1 \\wG1;wA1 \\wQ;wA1 wQ/;wA1 wQ-;wA1 wQ\\;wA1 wG1\\;wA1 wS1\\;wA1 bB1\\;wA1 bA1\\;wA1 bM\\;wA1 bL\\;wA1 bA2\\;wA1 /bA2;wA1 -bA2;wA1 \\bA2;wA1 -bM;wA1 /bQ;wA1 -bQ;wA2 \\wQ;wA2 wQ/;wA2 wQ-;wA2 wQ\\;wA2 wG1\\;wA2 \\wG1;wA2 \\wA1;wA2 -wP;wA2 -wA1;wA2 \\wP;wM \\wQ;wM wQ/;wM wQ-;wM wQ\\;wM wG1\\;wM \\wG1;wM \\wA1;wM -wP;wM -wA1;wM \\wP;wL \\wQ;wL wQ/;wL wQ-;wL wQ\\;wL wG1\\;wL \\wG1;wL \\wA1;wL -wP;wL -wA1;wL \\wP;wP \\wG1;wP -wS1;");
 
+    // wA2:-1->8259             wA2 -wA1                     1
     playMove(board, wA2, 8259);
     CheckValidMoves(board, "EXECUTED wA2 -wA1", "bS1 /bQ;bS1 bB1\\;bS1 bA1\\;bS1 \\bA2;bS1 -bM;bS1 bA2\\;bS1 /bA2;bS1 -bA2;bS1 bM\\;bS1 bL\\;bB2 /bQ;bB2 bB1\\;bB2 bA1\\;bB2 \\bA2;bB2 -bM;bB2 bA2\\;bB2 /bA2;bB2 -bA2;bB2 bM\\;bB2 bL\\;bG1 /bQ;bG1 bB1\\;bG1 bA1\\;bG1 \\bA2;bG1 -bM;bG1 bA2\\;bG1 /bA2;bG1 -bA2;bG1 bM\\;bG1 bL\\;bA2 -bM;bA2 /bQ;bA2 wA2\\;bA2 /wA2;bA2 -wA2;bA2 \\wA2;bA2 \\wA1;bA2 -wP;bA2 \\wP;bA2 \\wG1;bA2 \\wQ;bA2 wQ/;bA2 wQ-;bA2 wQ\\;bA2 wG1\\;bA2 wS1\\;bA2 bB1\\;bA2 bA1\\;bA2 bM\\;bA2 bL\\;bA2 /bL;bA3 /bQ;bA3 bB1\\;bA3 bA1\\;bA3 \\bA2;bA3 -bM;bA3 bA2\\;bA3 /bA2;bA3 -bA2;bA3 bM\\;bA3 bL\\;bP /bQ;bP bB1\\;bP bA1\\;bP \\bA2;bP -bM;bP bA2\\;bP /bA2;bP -bA2;bP bM\\;bP bL\\;");
 
@@ -478,22 +512,168 @@ void testGame48Moves()
     // bG2:7878->7622           bG2 bP\                  1
     playMove(board, bG2, 7622);
     CheckValidMoves(board, "EXECUTED bG2 bP\\", "wS2 /wP;wS2 \\wG3;wG2 bM\\;wG3 -bB1;wG3 wB2\\;wP -wG2;wP -bM;");
+
+    std::cout << "48 test eseguiti con successo" << '\n';
+}
+
+void testMzingaConnection()
+{
+    const char* enginePath = "/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/Mzinga/MzingaEngine";
+
+    int toChild[2], fromChild[2];
+    pipe(toChild);
+    pipe(fromChild);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(toChild[1]);
+        close(fromChild[0]);
+        dup2(toChild[0], STDIN_FILENO);
+        dup2(fromChild[1], STDOUT_FILENO);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        close(toChild[0]);
+        close(fromChild[1]);
+        execl(enginePath, enginePath, nullptr);
+        _exit(1);
+    }
+
+    close(toChild[0]);
+    close(fromChild[1]);
+    FILE* toEngine   = fdopen(toChild[1],  "w");
+    FILE* fromEngine = fdopen(fromChild[0], "r");
+
+    // Helper: legge finché non arriva "ok" e restituisce la risposta
+    auto readUntilOk = [&]() -> std::string {
+        std::string result;
+        char buf[8192];
+        while (fgets(buf, sizeof(buf), fromEngine)) {
+            if (strcmp(buf, "ok\n") == 0) break;
+            result += buf;
+        }
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+            result.pop_back();
+        return result;
+    };
+
+    // Helper: invia un comando e restituisce la risposta
+    auto send = [&](const std::string& cmd) -> std::string {
+        fprintf(toEngine, "%s\n", cmd.c_str());
+        fflush(toEngine);
+        return readUntilOk();
+    };
+
+    srand(static_cast<unsigned>(time(nullptr)));
+
+    // Mappa stringa -> PieceName (costruita una volta sola)
+    std::unordered_map<std::string, PieceName> nameMap;
+    for (int i = 0; i < static_cast<int>(NumPieceNames); i++) {
+        PieceName p = static_cast<PieceName>(i);
+        nameMap[GetEnumString(p)] = p;
+    }
+
+    // Parser UHP: converte una mossa UHP in (PieceName, Index destinazione)
+    auto parseUHP = [&](const std::string& uhp, const Board& b) -> std::pair<PieceName, Index> {
+        size_t sp = uhp.find(' ');
+        PieceName piece = nameMap[uhp.substr(0, sp)];
+
+        if (sp == std::string::npos)
+            return {piece, BoardCenter};  // prima mossa
+
+        std::string rest = uhp.substr(sp + 1);
+        char first = rest.front();
+        char last  = rest.back();
+
+        if (first == '/' || first == '\\' || first == '-') {
+            // indicatore PRIMA: dest è nella direzione indicata A PARTIRE DA ref
+            // '-' → Right (+1), '\\' → DownRight (+128), '/' → UpRight (-127)
+            Index refPos = b.GetPosition(nameMap[rest.substr(1)]);
+            Index offset = (first == '/') ? NeighborOffsets[5]   // UpRight  (-127)
+                         : (first == '\\') ? NeighborOffsets[1]  // DownRight (+128)
+                         : NeighborOffsets[0];                    // Right     (+1)
+            return {piece, refPos + offset};
+        }
+        if (last == '/' || last == '\\' || last == '-') {
+            // indicatore DOPO: dest è nella direzione opposta rispetto a sopra
+            // '/' → DownLeft (+127), '\\' → UpLeft (-128), '-' → Left (-1)
+            Index refPos = b.GetPosition(nameMap[rest.substr(0, rest.size() - 1)]);
+            Index offset = (last == '/') ? NeighborOffsets[2]   // DownLeft (+127)
+                         : (last == '\\') ? NeighborOffsets[4]  // UpLeft   (-128)
+                         : NeighborOffsets[3];                   // Left     (-1)
+            return {piece, refPos + offset};
+        }
+        // Nessun indicatore: beetle stack
+        return {piece, b.GetPosition(nameMap[rest])};
+    };
+
+    readUntilOk(); // messaggio di avvio
+
+    unsigned masterSeed = static_cast<unsigned>(time(nullptr));
+
+    for (int game = 0; game < 100; game++)
+    {
+        unsigned seed = masterSeed + static_cast<unsigned>(game);
+        srand(seed);
+        std::cout << "Game " << (game + 1) << "/100  seed=" << seed << '\n';
+
+        send("newgame Base+MLP");
+        Board board(GameType::BaseMLP);
+        board.boardState = BoardState::InProgress;
+
+        for (int turn = 0; turn < 150; turn++)
+        {
+            std::string movesStr = send("validmoves");
+
+            // "pass" = nessuna mossa disponibile, la partita è finita
+            if (movesStr == "pass") break;
+
+            std::string label = "game=" + std::to_string(game + 1) +
+                                " turn=" + std::to_string(turn) +
+                                " seed=" + std::to_string(seed);
+            CheckValidMoves(board, label, movesStr + ";", false);
+
+            // Sceglie una mossa a caso
+            std::vector<std::string> moves;
+            std::istringstream ss(movesStr);
+            std::string token;
+            while (std::getline(ss, token, ';'))
+                if (!token.empty()) moves.push_back(token);
+
+            std::string chosen = moves[rand() % moves.size()];
+            auto [piece, dest] = parseUHP(chosen, board);
+            std::cout << "  play " << chosen << '\n';
+            send("play " + chosen);
+            board.MovePiece(piece, dest);
+            board.ApplyTurnEffects(piece);
+        }
+
+        std::cout << " OK\n";
+    }
+
+    std::cout << "Tutti i test passati.\n";
+
+    fclose(toEngine);
+    fclose(fromEngine);
+    waitpid(pid, nullptr, 0);
 }
 
 int main()
 {
     Board::InitializeZobristTable();
 
-    //TestQueenBeeMoves();
-    //TestBeetleMoves();
-    //TestGrasshopperMoves();
-    //TestSpiderMoves();
-    //TestSoldierAntMoves();
-    //TestLadybugMoves();
-    //TestPillbugMoves();
-    //TestMosquitoMoves();
+    /*
+    TestQueenBeeMoves();
+    TestBeetleMoves();
+    TestGrasshopperMoves();
+    TestSpiderMoves();
+    TestSoldierAntMoves();
+    TestLadybugMoves();
+    TestPillbugMoves();
+    TestMosquitoMoves();
+    */
 
     testGame48Moves();
+    //testMzingaConnection();
 
     return 0;
 }
