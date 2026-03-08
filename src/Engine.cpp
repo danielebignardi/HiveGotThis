@@ -402,7 +402,6 @@ bool Engine::ApplyMove(const std::string& moveString)
     // che il Pillbug ha spostato (non possono muoversi nel turno successivo).
     // Va resettato qui perché è un vincolo che dura un solo turno.
     memset(m_board->cannotBeMoved, 0, sizeof(m_board->cannotBeMoved));
-
     if (moveString == PassMoveString)
     {
         // Mossa di passaggio: cambia solo il turno, nessun pezzo si sposta
@@ -416,6 +415,8 @@ bool Engine::ApplyMove(const std::string& moveString)
     }
 
     Move mv = MoveStringToMove(moveString);
+    m_board->cannotBeMoved[mv.Piece] = true;
+
     if (mv.Piece == PieceName::INVALID) return false;
 
     // Sposta fisicamente il pezzo sulla board
