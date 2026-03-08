@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <vector>
+#include <cstring>
 
 namespace HiveGotThis
 {  
