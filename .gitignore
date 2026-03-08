@@ -39,3 +39,16 @@
 
 # debug information files
 *.dwo
+
+# File system folder
+.DS_Store
+
+# Executable files
+build/
+
+# Files to obtain the test strings
+editMzingaMovesString
+editMzingaMovesString.cpp
+comandi_esecuzione.txt
+mosseDaEditare.txt
+TODO.txt

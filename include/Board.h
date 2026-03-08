@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <vector>
+#include <cstring>
 
 namespace HiveGotThis
 {  
@@ -41,7 +42,7 @@ class Board
         Color currentColor = Color::White;
 
         // Il turno aumenta di uno a ogni mossa. Turno dispari: bianco, turno pari: nero
-        int currentTurn = 1;
+        int currentTurn = 0;
 
         // Pezzi che per questo turno non possono essere mossi
         bool cannotBeMoved[NumPieceNames];
@@ -54,6 +55,9 @@ class Board
         
         // Restituisce il pezzo in cima se c'è, altrimenti INVALID
         PieceName GetPieceAt(Index position) const;
+
+        // Restituisce il pezzo direttamente sotto a piece nella pila (INVALID se nessuno)
+        PieceName GetPieceUnder(PieceName piece) const;
 
         // true se c'è un pezzo alla determinata posizione
         bool HasPieceAt(Index position) const;
@@ -79,6 +83,10 @@ class Board
         
         // Muove un pezzo da dov'è a newPosition (PopAt + PushAt)
         void MovePiece(PieceName pieceName, Index newPosition);
+
+        // Da chiamare dopo ogni mossa/piazzamento: aggiorna cannotBeMoved, currentTurn, currentColor.
+        // Sarà chiamata da PlayMove() (engine ufficiale) e per ora anche da playMove() nei test.
+        void ApplyTurnEffects(PieceName movedPiece);
         
 
 
@@ -101,7 +109,8 @@ class Board
         void GetEmptyNeighbors(Index pos, std::vector<Index>& result) const;
 
         // true se un pezzo si può spostare dalla posizione pos in direzione dir, muovendosi sullo stesso piano (Ground) o spostandosi di piano (Beetle)
-        bool CanSlide(Index pos, Direction dir, SlideMode mode) const;
+        // ignorePos: posizione da trattare come vuota durante il controllo dei gate (usato per ignorare la posizione di partenza del pezzo in movimento)
+        bool CanSlide(Index pos, Direction dir, SlideMode mode, Index ignorePos = NullIndex) const;
 
         // SARA 27 FEB
         //PER FUNZIONE CAN SLIDE: Pre-calcoliamo le "slide gates" per ogni direzione, ovvero le due posizioni che devono essere libere per poter scivolare in quella direzione
@@ -116,7 +125,8 @@ class Board
         };
 
         // Restituisce gli indici dei vicini verso i quali si può spostare, eccetto quelli già visitati
-        void GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result) const;
+        // ignorePos: propagato a CanSlide per ignorare la posizione di partenza del pezzo in movimento
+        void GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result, Index ignorePos = NullIndex) const;
 
 
 
@@ -129,7 +139,7 @@ class Board
         bool CanPlaceAt(Index pos, Color myColor, int currentTurn) const;
 
         // Piazzamento: celle vuote adiacenti all'hive, non adiacenti a pezzi avversari
-        void GetValidPlacements(Color color, std::vector<Move>& moves) const;
+        void GetValidPlacements(Color color, std::vector<Index>& positions) const;
 
         // Movimenti per tipo di insetto
         void GetQueenBeeMoves(PieceName piece, std::vector<Move>& moves) const;     // Slide 1 passo
@@ -208,6 +218,11 @@ inline PieceName Board::GetPieceAt(Index position) const
 {
     assert(IsValidIndex(position) && "GetPieceAt chiamato con indice invalido!");
     return cells[position];
+}
+
+inline PieceName Board::GetPieceUnder(PieceName piece) const
+{
+    return below[piece];
 }
 
 inline bool Board::HasPieceAt(Index position) const
