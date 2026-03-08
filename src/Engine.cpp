@@ -257,7 +257,7 @@ void Engine::CommandBestMove(const std::string& param)
     std::cout << MoveToMoveString(moves[dist(rng)]) << "\n";
     WriteOk();
 }
-
+/*
 void Engine::CommandPlay(const std::string& moveString)
 {
     if (moveString.empty())
@@ -306,7 +306,46 @@ void Engine::CommandPlay(const std::string& moveString)
 
     std::cout << BuildGameString() << "\n";
     WriteOk();
+}*/
+
+void Engine::CommandPlay(const std::string& moveString)
+{
+    if (moveString.empty()) { WriteInvalidMove(InvalidMoveMessage_Generic); return; }
+    if (moveString == PassMoveString) { CommandPass(); return; }
+
+    Move mv = MoveStringToMove(moveString);
+    if (mv.Piece == PieceName::INVALID)
+    {
+        WriteInvalidMove("Impossibile interpretare la mossa: " + moveString);
+        return;
+    }
+
+    std::vector<Move> validMoves;
+    m_board->GetValidMoves(validMoves);
+
+    bool found = false;
+    for (const Move& vm : validMoves)
+    {
+        if (vm.Piece == mv.Piece && vm.Destination == mv.Destination)
+        {
+            found = true;
+            mv = vm; // usa la Move interna (Source corretto)
+            break;
+        }
+    }
+
+    if (!found) { WriteInvalidMove(InvalidMoveMessage_Generic); return; }
+
+    // Normalizza la stringa PRIMA di applicarla
+    std::string normalizedMoveString = MoveToMoveString(mv);
+    ApplyMove(normalizedMoveString);  // stringa canonica, non quella del viewer
+    UpdateBoardState();
+
+    std::cout << BuildGameString() << "\n";
+    WriteOk();
 }
+
+
 
 void Engine::CommandPass()
 {
@@ -525,7 +564,9 @@ std::string Engine::PositionToRelativeString(Index pos) const
 
     static const char separators[6] = { '-', '/', '\\', '-', '/', '\\' };
     static const bool afterPiece[6] = { true, true, true, false, false, false };
-
+    // Priorità di scelta del pezzo di riferimento: Right(0) > DownRight(1) > ... > UpRight(5)
+    // Questa priorità è fissa e garantisce che MoveToMoveString sia deterministica:
+    // la stessa (pezzo, destinazione) produce sempre la stessa stringa UHP.
     for (int d = 0; d < 6; ++d)
     {
         Index neighborPos = GetNeighborAt(pos, static_cast<Direction>(d));
