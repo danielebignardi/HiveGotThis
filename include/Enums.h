@@ -97,6 +97,7 @@ enum class SlideMode : uint8_t
 };
 
 
+std::string GetEnumString(BoardState const &value);
 std::string GetEnumString(Color const &value);
 std::string GetEnumString(PieceName const &value);
 std::string GetEnumString(GameType const &value);
