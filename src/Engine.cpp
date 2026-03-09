@@ -562,6 +562,13 @@ std::string Engine::PositionToRelativeString(Index pos) const
     //   Pezzo in direzione UpLeft(4)    -> "/PieceName"   (separatore PRIMA)
     //   Pezzo in direzione UpRight(5)   -> "\PieceName"   (separatore PRIMA)
 
+    // Destinazione con un pezzo sopra: notazione "PieceName" senza separatore
+    PieceName onTop = m_board->GetPieceAt(pos);
+    if (onTop != PieceName::INVALID)
+    {
+        return GetEnumString(onTop); // restituisce "wQ" senza separatore
+    }
+
     static const char separators[6] = { '-', '/', '\\', '-', '/', '\\' };
     static const bool afterPiece[6] = { true, true, true, false, false, false };
     // Priorità di scelta del pezzo di riferimento: Right(0) > DownRight(1) > ... > UpRight(5)
