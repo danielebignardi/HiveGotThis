@@ -689,7 +689,7 @@ std::string Engine::BuildTurnString() const
     //   currentTurn=2 (primo turno nero)    -> Black[1]
     //   currentTurn=3 (secondo turno bianco)-> White[2]
     //   currentTurn=4 (secondo turno nero)  -> Black[2]
-    int round = (m_board->currentTurn + 1) / 2;
+    int round = (m_board->currentTurn/2) + 1;
 
     std::ostringstream ss;
     ss << GetEnumString(m_board->currentColor) << "[" << round << "]";
