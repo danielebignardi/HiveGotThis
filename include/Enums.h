@@ -134,6 +134,7 @@ inline Direction RightOf(Direction d)
     if (d >= Direction::NumDirections) return d;
     return static_cast<Direction>((static_cast<uint8_t>(d) + 1) % 6);
 }
+ */
 
 // Calcola la direzione OPPOSTA
 // Formula: (Dir + 3) % 6
@@ -142,7 +143,7 @@ inline Direction Opposite(Direction d)
     if (d >= Direction::NumDirections) return d;
     return static_cast<Direction>((static_cast<uint8_t>(d) + 3) % 6);
 }
- */
+
 
 
 }

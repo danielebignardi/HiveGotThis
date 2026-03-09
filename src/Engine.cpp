@@ -556,14 +556,14 @@ std::string Engine::PositionToRelativeString(Index pos) const
     // Mappa direzione (DA pos VERSO il pezzo) -> separatore UHP:
     //
     //   Pezzo in direzione Right(0)     -> "PieceName-"   (separatore DOPO)
-    //   Pezzo in direzione DownRight(1) -> "PieceName/"   (separatore DOPO)
-    //   Pezzo in direzione DownLeft(2)  -> "PieceName\"   (separatore DOPO)
+    //   Pezzo in direzione DownRight(1) -> "PieceName\"   (separatore DOPO)
+    //   Pezzo in direzione DownLeft(2)  -> "/PieceName"   (separatore PRIMA)
     //   Pezzo in direzione Left(3)      -> "-PieceName"   (separatore PRIMA)
-    //   Pezzo in direzione UpLeft(4)    -> "/PieceName"   (separatore PRIMA)
-    //   Pezzo in direzione UpRight(5)   -> "\PieceName"   (separatore PRIMA)
+    //   Pezzo in direzione UpLeft(4)    -> "\PieceName"   (separatore PRIMA)
+    //   Pezzo in direzione UpRight(5)   -> "PieceName/"   (separatore DOPO)
 
-    static const char separators[6] = { '-', '/', '\\', '-', '/', '\\' };
-    static const bool afterPiece[6] = { true, true, true, false, false, false };
+    static const char separators[6] = { '-', '\\', '/', '-', '\\', '/' };
+    static const bool afterPiece[6] = { true, true, false, false, false, true };
     // Priorità di scelta del pezzo di riferimento: Right(0) > DownRight(1) > ... > UpRight(5)
     // Questa priorità è fissa e garantisce che MoveToMoveString sia deterministica:
     // la stessa (pezzo, destinazione) produce sempre la stessa stringa UHP.
@@ -577,10 +577,10 @@ std::string Engine::PositionToRelativeString(Index pos) const
 
         // Trovato un pezzo adiacente: costruisci la notazione
         std::string pieceName = GetEnumString(np);
-        char sep = separators[d];
+        char sep = separators[static_cast<int>(Opposite(static_cast<Direction>(d)))];
 
         std::ostringstream ss;
-        if (afterPiece[d])
+        if (afterPiece[static_cast<int>(Opposite(static_cast<Direction>(d)))])
             ss << pieceName << sep;   // es. "wS1-"
         else
             ss << sep << pieceName;   // es. "-wS1"
@@ -622,11 +622,11 @@ Move Engine::MoveStringToMove(const std::string& moveString) const
     // Calcola la destinazione dai separatori.
     // La logica è l'inverso di PositionToRelativeString:
     //   "ref-"  -> dest è a DESTRA di ref      (Direction::Right)
-    //   "ref/"  -> dest è in BASSO-DESTRA       (Direction::DownRight)
-    //   "ref\"  -> dest è in BASSO-SINISTRA     (Direction::DownLeft)
+    //   "ref/"  -> dest è in alto-DESTRA       (Direction::UpRight)
+    //   "ref\"  -> dest è in BASSO-destra     (Direction::DownRight)
     //   "-ref"  -> dest è a SINISTRA di ref     (Direction::Left)
-    //   "/ref"  -> dest è in ALTO-SINISTRA      (Direction::UpLeft)
-    //   "\ref"  -> dest è in ALTO-DESTRA        (Direction::UpRight)
+    //   "/ref"  -> dest è in basso-SINISTRA      (Direction::DownLeft)
+    //   "\ref"  -> dest è in ALTO-Sinistra       (Direction::UpLeft)
     //   nessun separatore -> Beetle che sale sopra (dest == refPos)
     Index dest = NullIndex;
 
@@ -635,15 +635,15 @@ Move Engine::MoveStringToMove(const std::string& moveString) const
     else if (afterSep == '-')
         dest = GetNeighborAt(refPos, Direction::Right);
     else if (afterSep == '/')
-        dest = GetNeighborAt(refPos, Direction::DownRight);
+        dest = GetNeighborAt(refPos, Direction::UpRight);
     else if (afterSep == '\\')
-        dest = GetNeighborAt(refPos, Direction::DownLeft);
+        dest = GetNeighborAt(refPos, Direction::DownRight);
     else if (beforeSep == '-')
         dest = GetNeighborAt(refPos, Direction::Left);
     else if (beforeSep == '/')
-        dest = GetNeighborAt(refPos, Direction::UpLeft);
+        dest = GetNeighborAt(refPos, Direction::DownLeft);
     else if (beforeSep == '\\')
-        dest = GetNeighborAt(refPos, Direction::UpRight);
+        dest = GetNeighborAt(refPos, Direction::UpLeft);
 
     if (!IsValidIndex(dest)) return invalid;
 
