@@ -628,7 +628,7 @@ void testMzingaConnection()
 
     unsigned masterSeed; //static_cast<unsigned>(time(nullptr));
 
-    for (int game = 0; game < 1; game++)
+    for (int game = 0; game < 100; game++)
     {
         unsigned seed = masterSeed + static_cast<unsigned>(game);
         srand(seed);
@@ -638,7 +638,7 @@ void testMzingaConnection()
         Board board(GameType::BaseMLP);
         board.boardState = BoardState::InProgress;
 
-        for (int turn = 0; turn < 10000; turn++)
+        for (int turn = 0; turn < 1000; turn++)
         {
             std::string movesStr = send("validmoves");
 
@@ -654,7 +654,7 @@ void testMzingaConnection()
                 break;
             }
 
-            CheckValidMoves(board, label, movesStr + ";", true);
+            CheckValidMoves(board, label, movesStr + ";", false);
 
             // Sceglie una mossa a caso
             std::vector<std::string> moves;
