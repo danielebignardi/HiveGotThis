@@ -87,7 +87,7 @@ std::vector<std::string> GetAllUHPRepresentations(const Board& board, const Move
     }
 
     if (result.empty()) {
-        if (board.currentTurn == 0) // prima mossa: board vuota, nessun vicino atteso
+        if (board.GetCurrentTurn() == 0) // prima mossa: board vuota, nessun vicino atteso
             result.push_back(GetEnumString(move.Piece));
         else
             result.push_back("!NO!"); // nessun vicino inatteso: mossa invalida, non deve matchare
@@ -163,8 +163,7 @@ void CheckValidMoves(const Board& board, const std::string& message, const std::
 }
 
 void playMove(Board& board, PieceName piece, Index dest){
-    board.MovePiece(piece, dest);
-    board.ApplyTurnEffects(piece);
+    board.ApplyMove({piece, NullIndex, dest});
 }
 
 // Le mosse disponibili all'inizio della Board
@@ -172,7 +171,7 @@ void testGame48Moves()
 {
     // starting from empty board
     Board board(GameType::BaseMLP);
-    board.boardState = BoardState::InProgress;
+    board.StartGame();
 
     CheckValidMoves(board, "\nEMPTY BOARD", "wS1;wB1;wG1;wA1;wM;wL;wP;");
 
@@ -473,7 +472,7 @@ void testMzingaConnection()
 
         send("newgame Base+MLP");
         Board board(GameType::BaseMLP);
-        board.boardState = BoardState::InProgress;
+        board.StartGame();
 
         for (int turn = 0; turn < 1000; turn++)
         {
@@ -504,8 +503,7 @@ void testMzingaConnection()
             auto [piece, dest] = parseUHP(chosen, board);
             std::cout << "  play " << chosen << '\n';
             send("play " + chosen);
-            board.MovePiece(piece, dest);
-            board.ApplyTurnEffects(piece);
+            board.ApplyMove({piece, NullIndex, dest});
         }
 
         std::cout << " OK\n";

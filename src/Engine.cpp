@@ -60,7 +60,7 @@ void Engine::Run()
         {
             if (m_board == nullptr)
                 WriteError(ErrorMessage_NoGameInProgress);
-            else if (GameIsOver(m_board->boardState))
+            else if (GameIsOver(m_board->GetBoardState()))
                 WriteError(ErrorMessage_GameIsOver);
             else
                 CommandValidMoves();
@@ -69,7 +69,7 @@ void Engine::Run()
         {
             if (m_board == nullptr)
                 WriteError(ErrorMessage_NoGameInProgress);
-            else if (GameIsOver(m_board->boardState))
+            else if (GameIsOver(m_board->GetBoardState()))
                 WriteError(ErrorMessage_GameIsOver);
             else
                 CommandBestMove(param);
@@ -78,7 +78,7 @@ void Engine::Run()
         {
             if (m_board == nullptr)
                 WriteError(ErrorMessage_NoGameInProgress);
-            else if (GameIsOver(m_board->boardState))
+            else if (GameIsOver(m_board->GetBoardState()))
                 WriteError(ErrorMessage_GameIsOver);
             else
                 CommandPlay(param);
@@ -87,7 +87,7 @@ void Engine::Run()
         {
             if (m_board == nullptr)
                 WriteError(ErrorMessage_NoGameInProgress);
-            else if (GameIsOver(m_board->boardState))
+            else if (GameIsOver(m_board->GetBoardState()))
                 WriteError(ErrorMessage_GameIsOver);
             else
                 CommandPass();
@@ -167,7 +167,7 @@ void Engine::CommandNewGame(const std::string& param)
             m_board = new Board(gt);
             // La board è vuota e NotStarted: impostiamo subito InProgress
             // perché stiamo caricando una partita già iniziata
-            m_board->boardState = BoardState::InProgress;
+            m_board->StartGame();
 
             // parts[1] = GameStateString  -> ignorato, lo ricalcoliamo
             // parts[2] = TurnString       -> ignorato, lo ricaviamo dalle mosse
@@ -198,14 +198,14 @@ void Engine::CommandNewGame(const std::string& param)
                 return;
             }
             m_board = new Board(gt);
-            m_board->boardState = BoardState::InProgress;
+            m_board->StartGame();
         }
     }
     else
     {
         // Nessun parametro: partita base standard
         m_board = new Board(gt);
-        m_board->boardState = BoardState::InProgress;
+        m_board->StartGame();
     }
 
     std::cout << BuildGameString() << "\n";
@@ -345,8 +345,6 @@ void Engine::CommandPlay(const std::string& moveString)
     WriteOk();
 }
 
-
-
 void Engine::CommandPass()
 {
     // Il pass è valido solo se GetValidMoves restituisce solo PassMove
@@ -405,7 +403,7 @@ void Engine::CommandUndo(const std::string& param)
 
     if (!remaining.empty())
     {
-        m_board->boardState = BoardState::InProgress;
+        m_board->StartGame();
         for (const std::string& ms : remaining)
         {
             if (!ApplyMove(ms))
@@ -436,82 +434,25 @@ void Engine::CommandOptions(const std::string& param)
 
 bool Engine::ApplyMove(const std::string& moveString)
 {
-    // Azzera cannotBeMoved all'inizio di ogni mossa.
-    // Questo array viene impostato da GetPillbugMoves per bloccare i pezzi
-    // che il Pillbug ha spostato (non possono muoversi nel turno successivo).
-    // Va resettato qui perché è un vincolo che dura un solo turno.
-    memset(m_board->cannotBeMoved, 0, sizeof(m_board->cannotBeMoved));
     if (moveString == PassMoveString)
     {
-        // Mossa di passaggio: cambia solo il turno, nessun pezzo si sposta
-        m_board->currentColor = (m_board->currentColor == Color::White)
-                                 ? Color::Black : Color::White;
-        m_board->currentTurn++;
-        m_board->ToggleTurnHash();
-        m_board->boardState = BoardState::InProgress;
+        m_board->ApplyMove(PassMove);
         m_moveHistory.push_back(moveString);
         return true;
     }
 
     Move mv = MoveStringToMove(moveString);
-    m_board->cannotBeMoved[mv.Piece] = true;
-
     if (mv.Piece == PieceName::INVALID) return false;
 
-    // Sposta fisicamente il pezzo sulla board
-    m_board->MovePiece(mv.Piece, mv.Destination);
-
-    // Aggiorna turno e colore
-    m_board->currentColor = (m_board->currentColor == Color::White)
-                             ? Color::Black : Color::White;
-    m_board->currentTurn++;
-    m_board->ToggleTurnHash();
-    m_board->boardState = BoardState::InProgress;
-
-    // Salva la mossa nello storico
+    m_board->ApplyMove(mv);
     m_moveHistory.push_back(moveString);
-
     return true;
 }
 
 void Engine::UpdateBoardState()
 {
     if (m_board == nullptr) return;
-    if (m_board->boardState == BoardState::NotStarted) return;
-    if (GameIsOver(m_board->boardState)) return;
-
-    bool whiteQueenSurrounded = false;
-    bool blackQueenSurrounded = false;
-
-    if (m_board->PieceInPlay(PieceName::wQ))
-        whiteQueenSurrounded = (CountQueenNeighbors(Color::White) == 6);
-    if (m_board->PieceInPlay(PieceName::bQ))
-        blackQueenSurrounded = (CountQueenNeighbors(Color::Black) == 6);
-
-    if (whiteQueenSurrounded && blackQueenSurrounded)
-        m_board->boardState = BoardState::Draw;
-    else if (whiteQueenSurrounded)
-        m_board->boardState = BoardState::BlackWins;
-    else if (blackQueenSurrounded)
-        m_board->boardState = BoardState::WhiteWins;
-}
-
-int Engine::CountQueenNeighbors(Color color) const
-{
-    PieceName queen = (color == Color::White) ? PieceName::wQ : PieceName::bQ;
-    if (!m_board->PieceInPlay(queen)) return 0;
-
-    Index queenPos = m_board->GetPosition(queen);
-    int count = 0;
-
-    for (int d = 0; d < 6; ++d)
-    {
-        Index neighbor = GetNeighborAt(queenPos, static_cast<Direction>(d));
-        if (IsValidIndex(neighbor) && m_board->HasPieceAt(neighbor))
-            count++;
-    }
-
-    return count;
+    m_board->UpdateBoardState();
 }
 
 // =============================================================================
@@ -668,7 +609,7 @@ std::string Engine::BuildGameString() const
 
     std::ostringstream ss;
     ss << BuildGameTypeString() << ";";
-    ss << GetEnumString(m_board->boardState) << ";";
+    ss << GetEnumString(m_board->GetBoardState()) << ";";
     ss << BuildTurnString();
 
     for (const std::string& ms : m_moveHistory)
@@ -688,7 +629,7 @@ std::string Engine::BuildTurnString() const
     //   currentTurn=2 (primo turno nero)    -> Black[1]
     //   currentTurn=3 (secondo turno bianco)-> White[2]
     //   currentTurn=4 (secondo turno nero)  -> Black[2]
-    int round = (m_board->currentTurn/2) + 1;
+    int round = (m_board->GetCurrentTurn()/2) + 1;
 
     std::ostringstream ss;
     ss << GetEnumString(m_board->currentColor) << "[" << round << "]";
@@ -697,18 +638,7 @@ std::string Engine::BuildTurnString() const
 
 std::string Engine::BuildGameTypeString() const
 {
-    switch (m_board->gameType)
-    {
-        case GameType::Base:    return "Base";
-        case GameType::BaseM:   return "Base+M";
-        case GameType::BaseL:   return "Base+L";
-        case GameType::BaseP:   return "Base+P";
-        case GameType::BaseML:  return "Base+ML";
-        case GameType::BaseMP:  return "Base+MP";
-        case GameType::BaseLP:  return "Base+LP";
-        case GameType::BaseMLP: return "Base+MLP";
-        default:                return "Base";
-    }
+    return GetEnumString(m_board->gameType);
 }
 
 // =============================================================================

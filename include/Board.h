@@ -34,15 +34,9 @@ class Board
 
         // Tipo del gioco
         GameType gameType = GameType::Base;
-        
-        // Stato del gioco
-        BoardState boardState = BoardState::NotStarted;
-        
+
         // Colore del giocatore attuale. Inizia il bianco
         Color currentColor = Color::White;
-
-        // Il turno aumenta di uno a ogni mossa. Turno dispari: bianco, turno pari: nero
-        int currentTurn = 0;
 
         // Pezzi che per questo turno non possono essere mossi
         bool cannotBeMoved[NumPieceNames];
@@ -85,8 +79,10 @@ class Board
         void MovePiece(PieceName pieceName, Index newPosition);
 
         // Da chiamare dopo ogni mossa/piazzamento: aggiorna cannotBeMoved, currentTurn, currentColor.
-        // Sarà chiamata da PlayMove() (engine ufficiale) e per ora anche da playMove() nei test.
-        void ApplyTurnEffects(PieceName movedPiece);
+        void ApplyMove(const Move& move);
+
+        // Imposta boardState = InProgress (da chiamare all'avvio di una partita)
+        void StartGame();
         
 
 
@@ -100,6 +96,9 @@ class Board
 
         // true se la regina del colore indicato è sulla board ed è completamente circondata (tutti e 6 i vicini occupati)
         bool IsQueenSurrounded(Color color) const;
+
+        // Aggiorna boardState in base allo stato delle regine (vittoria/pareggio/in corso)
+        void UpdateBoardState();
 
 
 
@@ -170,9 +169,6 @@ class Board
         // 0 = vuoto, 1 = un pezzo, 2 = due pezzi, ...
         int8_t stackHeight[BoardSize];
 
-        // L' "impronta digitale" attuale della board
-        uint64_t currentHash; 
-
         // Tabella A: continene numeri casuali
         // [Pezzo][Posizione] -> è una tabella di 14 x 16 384 interi a 64 bit
         static uint64_t ZobristTable[NumPieceNames][BoardSize];
@@ -193,19 +189,37 @@ class Board
         // - - - - - - - - - - METODI PUBBLICI GENERALI - - - - - - - - - -
 
         // Restituisce lo stato della board
-        BoardState GetBoardState();
-        
+        BoardState GetBoardState() const;
+
         // Restituisce il turno attuale
-        int GetCurrentTurn();
+        int GetCurrentTurn() const;
 
         // Inizializza le tabelle dello Zobrist Hashing
-        static void InitializeZobristTable(); 
+        static void InitializeZobristTable();
 
         // Restituisce l'hash attuale
-        uint64_t GetHash();
+        uint64_t GetHash() const;
 
         // Modifica l'hash attuale con solo il turno
         void ToggleTurnHash() { currentHash ^= ZobristBlackTurn; }
+
+    private:
+
+        // - - - - - - - - - - CAMPI PRIVATI - - - - - - - - - -
+
+        // Stato del gioco
+        BoardState boardState = BoardState::NotStarted;
+
+        // Il turno aumenta di uno a ogni mossa
+        int currentTurn = 0;
+
+        // L' "impronta digitale" attuale della board
+        uint64_t currentHash;
+
+        // - - - - - - - - - - HELPER PRIVATI - - - - - - - - - -
+
+        void ApplyTurnEffects();
+        void ToggleColor();
 };   
 
 
@@ -258,17 +272,17 @@ inline bool Board::PieceIsOnTop(PieceName pieceName) const
 
 // - - - - - - - - - - DEFINIZIONE (INLINE) DI METODI PUBBLICI GENERALI - - - - - - - - - -
 
-inline BoardState Board::GetBoardState()
+inline BoardState Board::GetBoardState() const
 {
     return boardState;
 }
 
-inline int Board::GetCurrentTurn()
+inline int Board::GetCurrentTurn() const
 {
     return currentTurn;
 }
 
-inline uint64_t Board::GetHash()
+inline uint64_t Board::GetHash() const
 {
     return currentHash;
 }
