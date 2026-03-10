@@ -237,6 +237,25 @@ bool Board::IsOneHive(Index ignorePos) const
 
 
 
+bool Board::IsQueenSurrounded(Color color) const
+{
+    PieceName queen = (color == Color::White) ? PieceName::wQ : PieceName::bQ;
+
+    if (PieceInHand(queen)) return false;
+
+    Index pos = piecesPositions[queen];
+
+    for (int offset : NeighborOffsets)
+    {
+        Index neighbor = pos + offset;
+        if (!IsValidIndex(neighbor) || !HasPieceAt(neighbor)) return false;
+    }
+
+    return true;
+}
+
+
+
 // - - - - - - - - - - FUNZIONI DI UTILITÀ PER LA GENERAZIONE DELLE MOSSE - - - - - - - - - -
 
 bool Board::CanSlide(Index pos, Direction dir, SlideMode mode, Index ignorePos) const
@@ -568,16 +587,20 @@ void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
 
 void Board::GetMosquitoMoves(PieceName piece, std::vector<Move>& moves) const
 {
-    if (!CanMoveWithoutBreakingHive(piece)) return;
-
     Index pos = piecesPositions[piece];
 
     // Caso speciale: se la Mosquito è sopra un pezzo, si muove solo come Beetle
     if (stackHeight[pos] > 1)
     {
+        if (!CanMoveWithoutBreakingHive(piece)) return;
         GetBeetleMoves(piece, moves);
         return;
     }
+
+    // La Mosquito può copiare la special ability del Pillbug anche se è pinnata,
+    // perché il Pillbug non richiede di muoversi fisicamente.
+    // Tutti gli altri tipi richiedono che il pezzo possa muoversi senza rompere l'hive.
+    bool canMove = CanMoveWithoutBreakingHive(piece);
 
     // Tipi di insetti adiacenti già processati (per evitare duplicati)
     bool processedTypes[static_cast<int>(BugType::NumBugTypes)] = { false };
@@ -598,6 +621,12 @@ void Board::GetMosquitoMoves(PieceName piece, std::vector<Move>& moves) const
         if (processedTypes[static_cast<int>(type)]) continue;
         processedTypes[static_cast<int>(type)] = true;
 
+        // Pillbug: la special ability funziona anche quando pinnata
+        if (type == BugType::Pillbug) { GetPillbugMoves(piece, moves); continue; }
+
+        // Gli altri tipi richiedono che la Mosquito possa muoversi
+        if (!canMove) continue;
+
         switch (type)
         {
             case BugType::QueenBee:    GetQueenBeeMoves(piece, moves);    break;
@@ -606,11 +635,9 @@ void Board::GetMosquitoMoves(PieceName piece, std::vector<Move>& moves) const
             case BugType::Spider:      GetSpiderMoves(piece, moves);      break;
             case BugType::SoldierAnt:  GetSoldierAntMoves(piece, moves);  break;
             case BugType::Ladybug:     GetLadybugMoves(piece, moves);     break;
-            case BugType::Pillbug:     GetPillbugMoves(piece, moves);     break;
             default: break;
         }
     }
-    // Se processedTypes è tutto false, non è stata generata nessuna mossa <-> adiacente solo a Mosquito, moves resta vuoto
 }
 
 void Board::GetValidMoves(std::vector<Move>& moves) const

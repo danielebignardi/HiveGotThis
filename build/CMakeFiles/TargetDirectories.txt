@@ -1,9 +1,0 @@
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/hive_core.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/TestBoard.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/TestSenzaBoard.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/TestIsOneHive.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/TestZobristHash.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/TestZobristHash2.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/TestMoves.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/edit_cache.dir
-/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/HiveGotThis/build/CMakeFiles/rebuild_cache.dir

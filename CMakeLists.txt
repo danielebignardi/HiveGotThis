@@ -4,15 +4,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(include)
 
-# Libreria comune
 add_library(hive_core
     src/Board.cpp
     src/Enums.cpp
     src/Move.cpp
+    src/Engine.cpp
 )
 
-# Un eseguibile per ogni file di test
-foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestMoves)
-    add_executable(${test} src/${test}.cpp)
-    target_link_libraries(${test} hive_core)
+file(GLOB TEST_SOURCES tests/*.cpp)
+foreach(TEST_SOURCE ${TEST_SOURCES})
+    get_filename_component(TEST_NAME ${TEST_SOURCE} NAME_WE)
+    add_executable(${TEST_NAME} ${TEST_SOURCE})
+    target_link_libraries(${TEST_NAME} hive_core)
 endforeach()

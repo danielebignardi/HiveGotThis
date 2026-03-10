@@ -270,6 +270,7 @@ void CheckValidMoves(const Board& board, const std::string& message, const std::
     if (verbose) {
         std::cout << message << '\n';
         std::cout << ourCount << " our / " << mzingaCount << " mzinga\n";
+        std::cout << "Mzinga moves: " << mzingaMoves << '\n';
     }
 
     for (Move move : moves)
@@ -302,7 +303,24 @@ void CheckValidMoves(const Board& board, const std::string& message, const std::
 
     if (!verbose && ourCount != mzingaCount) {
         std::cout << "\nFAIL: " << message << '\n';
-        std::cout << ourCount << " our / " << mzingaCount << " mzinga\n" << std::flush;
+        std::cout << ourCount << " our / " << mzingaCount << " mzinga\n";
+    }
+
+    if (ourCount != mzingaCount) {
+        std::istringstream mss(mzingaMoves);
+        std::string tok;
+        while (std::getline(mss, tok, ';')) {
+            if (tok.empty()) continue;
+            bool found = false;
+            for (Move mv : moves) {
+                auto reps = GetAllUHPRepresentations(board, mv);
+                for (const std::string& rep : reps)
+                    if (rep == tok) { found = true; break; }
+                if (found) break;
+            }
+            if (!found) std::cout << "  MISSING: " << tok << '\n';
+        }
+        std::cout << std::flush;
     }
     assert(ourCount == mzingaCount);
 }
@@ -608,9 +626,9 @@ void testMzingaConnection()
 
     readUntilOk(); // messaggio di avvio
 
-    unsigned masterSeed = static_cast<unsigned>(time(nullptr));
+    unsigned masterSeed; //static_cast<unsigned>(time(nullptr));
 
-    for (int game = 0; game < 100; game++)
+    for (int game = 0; game < 1; game++)
     {
         unsigned seed = masterSeed + static_cast<unsigned>(game);
         srand(seed);
@@ -620,7 +638,7 @@ void testMzingaConnection()
         Board board(GameType::BaseMLP);
         board.boardState = BoardState::InProgress;
 
-        for (int turn = 0; turn < 150; turn++)
+        for (int turn = 0; turn < 10000; turn++)
         {
             std::string movesStr = send("validmoves");
 
@@ -630,7 +648,13 @@ void testMzingaConnection()
             std::string label = "game=" + std::to_string(game + 1) +
                                 " turn=" + std::to_string(turn) +
                                 " seed=" + std::to_string(seed);
-            CheckValidMoves(board, label, movesStr + ";", false);
+
+            if ((board.IsQueenSurrounded(Color::White) || board.IsQueenSurrounded(Color::Black)) && movesStr == "err The game is over. Try 'newgame' to start a new game.") {
+                std::cout << "GAME ENDED FOR BOTH" << '\n';
+                break;
+            }
+
+            CheckValidMoves(board, label, movesStr + ";", true);
 
             // Sceglie una mossa a caso
             std::vector<std::string> moves;
@@ -672,8 +696,8 @@ int main()
     TestMosquitoMoves();
     */
 
-    testGame48Moves();
-    //testMzingaConnection();
+    //testGame48Moves();
+    testMzingaConnection();
 
     return 0;
 }
