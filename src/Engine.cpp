@@ -165,9 +165,8 @@ void Engine::CommandNewGame(const std::string& param)
             }
 
             m_board = new Board(gt);
-            // La board è vuota e NotStarted: impostiamo subito InProgress
-            // perché stiamo caricando una partita già iniziata
-            m_board->StartGame();
+            // boardState parte da NotStarted (costruttore).
+            // Il primo ApplyMove chiamerà ApplyTurnEffects() che porta a InProgress.
 
             // parts[1] = GameStateString  -> ignorato, lo ricalcoliamo
             // parts[2] = TurnString       -> ignorato, lo ricaviamo dalle mosse
@@ -185,8 +184,6 @@ void Engine::CommandNewGame(const std::string& param)
                 }
             }
 
-            // Ricalcola lo stato finale (vittoria/pareggio)
-            UpdateBoardState();
         }
         else
         {
@@ -198,14 +195,14 @@ void Engine::CommandNewGame(const std::string& param)
                 return;
             }
             m_board = new Board(gt);
-            m_board->StartGame();
+            // m_board->StartGame(); // BUG UHP: setterebbe InProgress su una board vuota (0 mosse); deve restare NotStarted
         }
     }
     else
     {
         // Nessun parametro: partita base standard
         m_board = new Board(gt);
-        m_board->StartGame();
+        // m_board->StartGame(); // BUG UHP: setterebbe InProgress su una board vuota (0 mosse); deve restare NotStarted
     }
 
     std::cout << BuildGameString() << "\n";
@@ -302,7 +299,6 @@ void Engine::CommandPlay(const std::string& moveString)
 
     // Applica la mossa
     ApplyMove(moveString);
-    UpdateBoardState();
 
     std::cout << BuildGameString() << "\n";
     WriteOk();
@@ -339,7 +335,6 @@ void Engine::CommandPlay(const std::string& moveString)
     // Normalizza la stringa PRIMA di applicarla
     std::string normalizedMoveString = MoveToMoveString(mv);
     ApplyMove(normalizedMoveString);  // stringa canonica, non quella del viewer
-    UpdateBoardState();
 
     std::cout << BuildGameString() << "\n";
     WriteOk();
@@ -368,7 +363,6 @@ void Engine::CommandPass()
     }
 
     ApplyMove(PassMoveString);
-    UpdateBoardState();
 
     std::cout << BuildGameString() << "\n";
     WriteOk();
@@ -403,7 +397,7 @@ void Engine::CommandUndo(const std::string& param)
 
     if (!remaining.empty())
     {
-        m_board->StartGame();
+        // m_board->StartGame(); // ridondante: il primo ApplyMove chiama ApplyTurnEffects() → InProgress
         for (const std::string& ms : remaining)
         {
             if (!ApplyMove(ms))
@@ -414,7 +408,6 @@ void Engine::CommandUndo(const std::string& param)
                 return;
             }
         }
-        UpdateBoardState();
     }
 
     std::cout << BuildGameString() << "\n";
@@ -447,12 +440,6 @@ bool Engine::ApplyMove(const std::string& moveString)
     m_board->ApplyMove(mv);
     m_moveHistory.push_back(moveString);
     return true;
-}
-
-void Engine::UpdateBoardState()
-{
-    if (m_board == nullptr) return;
-    m_board->UpdateBoardState();
 }
 
 // =============================================================================

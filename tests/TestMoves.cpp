@@ -15,30 +15,11 @@
 
 using namespace HiveGotThis;
 
-void CheckTest(const std::string& testName, bool passed)
-{
-    std::cout << (passed ? "[OK] " : "[FAIL] ") << testName << std::endl;
-}
-
-// Restituisce true se una delle mosse ha quella destinazione
-static bool HasDest(const std::vector<Move>& moves, Index dest)
-{
-    for (const Move& m : moves) if (m.Destination == dest) return true;
-    return false;
-}
-
-// Restituisce true se `to` è adiacente a `from`
-static bool IsAdjacentTo(Index from, Index to)
-{
-    for (int i = 0; i < 6; i++)
-        if (from + NeighborOffsets[i] == to) return true;
-    return false;
-}
-
 // - - - - - - - - - - TEST CONFIGURAZIONE - - - - - - - - - -
 // Genera tutte le rappresentazioni UHP valide per una mossa.
 // La stessa mossa può essere descritta in più modi in UHP (un riferimento diverso per ogni vicino),
 // quindi generiamo tutte le varianti per confrontarle con quelle di Mzinga.
+
 std::vector<std::string> GetAllUHPRepresentations(const Board& board, const Move& move) {
     std::vector<std::string> result;
 
@@ -166,7 +147,6 @@ void playMove(Board& board, PieceName piece, Index dest){
     board.ApplyMove({piece, NullIndex, dest});
 }
 
-// Le mosse disponibili all'inizio della Board
 void testGame48Moves()
 {
     // starting from empty board

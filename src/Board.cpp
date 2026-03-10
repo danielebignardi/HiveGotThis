@@ -110,12 +110,14 @@ void Board::ApplyMove(const Move& move)
     {
         // Mossa di passaggio: cambia solo il turno, nessun pezzo si sposta
         ApplyTurnEffects();
+        UpdateBoardState();
         return;
     }
 
     cannotBeMoved[move.Piece] = true;
     MovePiece(move.Piece, move.Destination);
     ApplyTurnEffects();
+    UpdateBoardState();
 }
 
 void Board::ApplyTurnEffects() {
@@ -133,6 +135,7 @@ void Board::ToggleColor() {
 void Board::StartGame() {
     boardState = BoardState::InProgress;
 }
+
 
 
 // - - - - - - - - - - ZOBRIST HASHING - - - - - - - - - -
