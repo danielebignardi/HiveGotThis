@@ -94,9 +94,12 @@ class Board
 
         // true se il pezzo può spostarsi anche temporaneamente dalla sua posizione attuale senza rompere l'hive
         bool CanMoveWithoutBreakingHive(PieceName piece) const;
-        
+
         // true se la configurazione attuale della board è un solo hive (condizione che deve essere garantita)
         bool IsOneHive(Index ignorePos) const;
+
+        // true se la regina del colore indicato è sulla board ed è completamente circondata (tutti e 6 i vicini occupati)
+        bool IsQueenSurrounded(Color color) const;
 
 
 

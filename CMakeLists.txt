@@ -13,7 +13,7 @@ add_library(hive_core
 )
 
 # Un eseguibile per ogni file di test
-foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine)
+foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestMoves)
     add_executable(${test} tests/${test}.cpp)
     target_link_libraries(${test} hive_core)
 endforeach()
