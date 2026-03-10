@@ -90,10 +90,6 @@ private:
     // Non stampa nulla. Restituisce false se la mossa non è parsabile.
     bool ApplyMove(const std::string& moveString);
 
-    // Controlla se la partita è terminata (regina circondata) e aggiorna boardState.
-    // Va chiamata dopo ogni mossa.
-    void UpdateBoardState();
-
     // -------------------------------------------------------------------------
     // CONVERSIONE POSIZIONE <-> MOVESTRING UHP
     // -------------------------------------------------------------------------
