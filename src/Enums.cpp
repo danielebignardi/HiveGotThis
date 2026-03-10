@@ -166,6 +166,22 @@ PieceName GetPieceNameValue(const char *str)
     return PieceName::INVALID;
 }
 
+std::string GetEnumString(GameType const &value)
+{
+    switch (value)
+    {
+        case GameType::Base:    return "Base";
+        case GameType::BaseM:   return "Base+M";
+        case GameType::BaseL:   return "Base+L";
+        case GameType::BaseP:   return "Base+P";
+        case GameType::BaseML:  return "Base+ML";
+        case GameType::BaseMP:  return "Base+MP";
+        case GameType::BaseLP:  return "Base+LP";
+        case GameType::BaseMLP: return "Base+MLP";
+        default:                return "Base";
+    }
+}
+
 GameType GetGameTypeValue(const char *str)
 {
     if (strcmp(str, "Base") == 0)

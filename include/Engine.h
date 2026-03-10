@@ -94,9 +94,6 @@ private:
     // Va chiamata dopo ogni mossa.
     void UpdateBoardState();
 
-    // Conta quanti vicini occupati ha la posizione della regina del colore indicato.
-    int CountQueenNeighbors(Color color) const;
-
     // -------------------------------------------------------------------------
     // CONVERSIONE POSIZIONE <-> MOVESTRING UHP
     // -------------------------------------------------------------------------

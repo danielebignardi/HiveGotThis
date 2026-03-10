@@ -97,18 +97,42 @@ void Board::MovePiece(PieceName pieceName, Index newPosition)
     PushAt(pieceName, newPosition);
 }
 
-
-
-void Board::ApplyTurnEffects(PieceName movedPiece)
+void Board::ApplyMove(const Move& move)
 {
-    // Il pezzo mosso/piazzato non può essere spostato dal Pillbug nel turno successivo
+    // Azzera cannotBeMoved all'inizio di ogni mossa.
+    // Questo array viene impostato da GetPillbugMoves per bloccare i pezzi
+    // che il Pillbug ha spostato (non possono muoversi nel turno successivo).
+    // Va resettato qui perché è un vincolo che dura un solo turno.
+    
     memset(cannotBeMoved, 0, sizeof(cannotBeMoved));
-    cannotBeMoved[movedPiece] = true;
 
-    currentColor = static_cast<Color>((static_cast<int>(currentColor) + 1) % 2);
-    currentTurn++;
+    if (move == PassMove)
+    {
+        // Mossa di passaggio: cambia solo il turno, nessun pezzo si sposta
+        ApplyTurnEffects();
+        return;
+    }
+
+    cannotBeMoved[move.Piece] = true;
+    MovePiece(move.Piece, move.Destination);
+    ApplyTurnEffects();
 }
 
+void Board::ApplyTurnEffects() {
+    ToggleColor();
+    currentTurn++;
+    ToggleTurnHash();
+    boardState = BoardState::InProgress;
+    hashHistory.push_back(currentHash);
+}
+
+void Board::ToggleColor() {
+    currentColor = (currentColor == Color::White) ? Color::Black : Color::White;
+}
+
+void Board::StartGame() {
+    boardState = BoardState::InProgress;
+}
 
 
 // - - - - - - - - - - ZOBRIST HASHING - - - - - - - - - -
@@ -235,8 +259,6 @@ bool Board::IsOneHive(Index ignorePos) const
     return nodesFound == nodesExpected;
 }
 
-
-
 bool Board::IsQueenSurrounded(Color color) const
 {
     PieceName queen = (color == Color::White) ? PieceName::wQ : PieceName::bQ;
@@ -252,6 +274,36 @@ bool Board::IsQueenSurrounded(Color color) const
     }
 
     return true;
+}
+
+void Board::UpdateBoardState()
+{
+    if (boardState == BoardState::NotStarted) return;
+    if (GameIsOver(boardState)) return;
+
+    bool whiteQueenSurrounded = PieceInPlay(PieceName::wQ) && IsQueenSurrounded(Color::White);
+    bool blackQueenSurrounded = PieceInPlay(PieceName::bQ) && IsQueenSurrounded(Color::Black);
+
+    if (whiteQueenSurrounded && blackQueenSurrounded)
+        boardState = BoardState::Draw;
+    else if (whiteQueenSurrounded)
+        boardState = BoardState::BlackWins;
+    else if (blackQueenSurrounded)
+        boardState = BoardState::WhiteWins;
+    else
+    {
+        int count = 0;
+        for (uint64_t h : hashHistory)
+            if (h == currentHash)
+            {
+                count++;
+                if (count >= 3)
+                {
+                    boardState = BoardState::Draw;
+                    break;
+                }
+            }
+    }
 }
 
 
@@ -777,8 +829,6 @@ bool Board::CanPlaceAt(Index pos, Color myColor, int currentTurn) const
 
     return foundFriend;
 }
-
-// Mette in positions gli indici delle celle in cui il giocatore corrente può posizionare un pezzo
 
 void Board::GetValidPlacements(Color color, std::vector<Index>& positions) const
 {
