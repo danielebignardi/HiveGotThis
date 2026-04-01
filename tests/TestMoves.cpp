@@ -2,6 +2,7 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <chrono>
 
 // questi include servono solo per interagire con MzingaEngine
 #include <unistd.h>
@@ -350,7 +351,7 @@ void testGame48Moves()
     std::cout << "48 test eseguiti con successo" << '\n';
 }
 
-void testMzingaConnection()
+void testMzingaConnection(int numGames = 5)
 {
     const char* enginePath = "/Users/umbertocrema/Desktop/Lavoro/Scuola_Ortogonale/Game/Mzinga/MzingaEngine";
 
@@ -443,53 +444,69 @@ void testMzingaConnection()
     readUntilOk(); // messaggio di avvio
 
     unsigned masterSeed = static_cast<unsigned>(time(nullptr));
+    auto startTime = std::chrono::steady_clock::now();
 
-    for (int game = 0; game < 100; game++)
+    for (int game = 0; game < numGames; game++)
     {
         unsigned seed = masterSeed + static_cast<unsigned>(game);
         srand(seed);
-        std::cout << "Game " << (game + 1) << "/100  seed=" << seed << '\n';
+        std::cout << "Game " << (game + 1) << "/" << numGames << "  seed=" << seed << '\n';
 
         send("newgame Base+MLP");
         Board board(GameType::BaseMLP);
         board.StartGame();
 
-        for (int turn = 0; turn < 1000; turn++)
+        int totalTurns = 0;
+        for (int turn = 0; ; turn++, totalTurns++)
         {
             std::string movesStr = send("validmoves");
 
-            // "pass" = nessuna mossa disponibile, la partita è finita
-            if (movesStr == "pass") break;
+            // L'engine segnala partita conclusa (regina circondata o pareggio)
+            if (movesStr.rfind("err", 0) == 0) {
+                std::cout << "  Game over: " << movesStr << '\n';
+                break;
+            }
 
             std::string label = "game=" + std::to_string(game + 1) +
                                 " turn=" + std::to_string(turn) +
                                 " seed=" + std::to_string(seed);
 
-            if ((board.IsQueenSurrounded(Color::White) || board.IsQueenSurrounded(Color::Black)) && movesStr == "err The game is over. Try 'newgame' to start a new game.") {
-                std::cout << "GAME ENDED FOR BOTH" << '\n';
-                break;
+            // "pass" = nessuna mossa disponibile per questo turno, si passa
+            if (movesStr == "pass") {
+                //std::cout << "  pass\n";
+                send("play pass");
+                board.ApplyMove(PassMove);
+            } else {
+                CheckValidMoves(board, label, movesStr + ";", false);
+
+                // Sceglie una mossa a caso
+                std::vector<std::string> moves;
+                std::istringstream ss(movesStr);
+                std::string token;
+                while (std::getline(ss, token, ';'))
+                    if (!token.empty()) moves.push_back(token);
+
+                std::string chosen = moves[rand() % moves.size()];
+                auto [piece, dest] = parseUHP(chosen, board);
+                //std::cout << "  play " << chosen << '\n';
+                send("play " + chosen);
+                board.ApplyMove({piece, NullIndex, dest});
             }
 
-            CheckValidMoves(board, label, movesStr + ";", false);
-
-            // Sceglie una mossa a caso
-            std::vector<std::string> moves;
-            std::istringstream ss(movesStr);
-            std::string token;
-            while (std::getline(ss, token, ';'))
-                if (!token.empty()) moves.push_back(token);
-
-            std::string chosen = moves[rand() % moves.size()];
-            auto [piece, dest] = parseUHP(chosen, board);
-            std::cout << "  play " << chosen << '\n';
-            send("play " + chosen);
-            board.ApplyMove({piece, NullIndex, dest});
+            if (GameIsOver(board.GetBoardState())) {
+                std::cout << "  Board state: " << GetEnumString(board.GetBoardState()) << '\n';
+                break;
+            }
         }
 
-        std::cout << " OK\n";
+        std::cout << " OK (" << totalTurns << " mosse)\n";
     }
 
-    std::cout << "Tutti i test passati.\n";
+    auto elapsed = std::chrono::steady_clock::now() - startTime;
+    double seconds = std::chrono::duration<double>(elapsed).count();
+    std::cout << "Tutti i test passati. " << numGames << " giochi in "
+              << std::fixed << std::setprecision(2) << seconds << "s"
+              << " (" << std::setprecision(2) << (seconds / numGames) << "s/gioco)\n";
 
     fclose(toEngine);
     fclose(fromEngine);
@@ -512,7 +529,7 @@ int main()
     */
 
     //testGame48Moves();
-    testMzingaConnection();
+    testMzingaConnection(5);
 
     return 0;
 }
