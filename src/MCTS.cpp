@@ -200,10 +200,6 @@ void MCTS::TrySolve(MCTSNode* node)
     if (!node->isExpanded || node->children.empty())
         return;
 
-    // TODO: RIDONDANTE?
-    if (!node->unexpandedMoves.empty())
-        return; // Ci sono ancora figli da generare: non possiamo concludere nulla
-
     bool allChildrenProven = true;
 
     if (node->isMaxNode)
@@ -495,6 +491,7 @@ Move MCTS::Search(const Board& rootBoard, int timeLimitMs)
     }
 
     MCTSNode root(PassMove, nullptr, /*isMaxNode=*/true);
+    root.visitCount = 1;
     TranspositionTable tt(18);
 
     auto startTime = std::chrono::steady_clock::now();
@@ -538,6 +535,7 @@ Move MCTS::SearchIterations(const Board& rootBoard, int maxIterations)
     }
 
     MCTSNode root(PassMove, nullptr, /*isMaxNode=*/true);
+    root.visitCount = 1;
     TranspositionTable tt(18);
 
     for (int i = 0; i < maxIterations; i++)
