@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "MCTS.h"
 
 #include <iostream>
 #include <sstream>
@@ -6,6 +7,7 @@
 #include <random>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
 
 namespace HiveGotThis
 {
@@ -242,7 +244,8 @@ void Engine::CommandBestMove(const std::string& param)
         return;
     }
 
-    // --- SELEZIONE CASUALE ---
+    /*
+    // --- SELEZIONE CASUALE (VECCHIA IMPLEMENTAZIONE) ---
     // Per ora il motore sceglie una mossa a caso tra quelle disponibili.
     // In futuro qui andrà l'algoritmo di ricerca (Minimax, MCTS, ecc.)
     // Il parametro "time hh:mm:ss" o "depth N" viene ignorato per ora.
@@ -253,6 +256,48 @@ void Engine::CommandBestMove(const std::string& param)
 
     std::cout << MoveToMoveString(moves[dist(rng)]) << "\n";
     WriteOk();
+    */
+
+    // ===================== MCTS =====================
+
+    // Se c'e' una sola mossa legale, giocala subito senza cercare
+    if (moves.size() == 1)
+    {
+        std::cout << MoveToMoveString(moves[0]) << "\n";
+        WriteOk();
+        return;
+    }
+
+    // Parsa il parametro "time HH:MM:SS" o "depth N"
+    std::vector<std::string> tokens = Split(param);
+    int timeLimitMs = 5000; // 5 secondi
+
+    if (tokens.size() >= 2)
+    {
+        if (tokens[0] == "time")
+        {
+            int h = 0, m = 0, s = 0;
+            std::sscanf(tokens[1].c_str(), "%d:%d:%d", &h, &m, &s);
+            timeLimitMs = (h * 3600 + m * 60 + s) * 1000;
+            // Usa il 95% del tempo per lasciare margine
+            timeLimitMs = static_cast<int>(timeLimitMs * 0.95);
+            if (timeLimitMs < 100) timeLimitMs = 100;
+        }
+        else if (tokens[0] == "depth")
+        {
+            int depth = std::stoi(tokens[1]);
+            Move best = MCTS::SearchIterations(*m_board, depth * 1000);
+            std::cout << MoveToMoveString(best) << "\n";
+            WriteOk();
+            return;
+        }
+    }
+
+    Move best = MCTS::Search(*m_board, timeLimitMs);
+    std::cout << MoveToMoveString(best) << "\n";
+    WriteOk();
+
+    // ================================================
 }
 /*
 void Engine::CommandPlay(const std::string& moveString)

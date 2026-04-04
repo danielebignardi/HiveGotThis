@@ -10,6 +10,8 @@ add_library(hive_core
     src/Enums.cpp
     src/Move.cpp
     src/Engine.cpp
+    src/Evaluation.cpp
+    src/MCTS.cpp
 )
 
 # Eseguibile principale (il bot UHP)
