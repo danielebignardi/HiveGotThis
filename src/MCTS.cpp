@@ -106,6 +106,7 @@ double MCTSNode::UCB1(double explorationC, double logParentVisits, bool maximizi
     double exploitation = maximizing ? winRate : (1.0 - winRate);
 
     double exploration = explorationC * std::sqrt(logParentVisits / static_cast<double>(visitCount));
+    
     double bias = PROGRESSIVE_BIAS_WEIGHT * heuristicScore / static_cast<double>(visitCount + 1);
 
     return exploitation + exploration + bias;
@@ -198,6 +199,8 @@ void MCTS::TrySolve(MCTSNode* node)
 {
     if (!node->isExpanded || node->children.empty())
         return;
+
+    // TODO: RIDONDANTE?
     if (!node->unexpandedMoves.empty())
         return; // Ci sono ancora figli da generare: non possiamo concludere nulla
 
