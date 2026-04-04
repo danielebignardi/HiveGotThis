@@ -12,11 +12,12 @@ add_library(hive_core
     src/Engine.cpp
 )
 
-# Un eseguibile per ogni file di test
-foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestMoves)
+# Eseguibile principale (il bot UHP)
+add_executable(HiveEngine src/main.cpp)
+target_link_libraries(HiveEngine hive_core)
+
+# Test (escluso TestMoves: usa API Unix non disponibili su Windows)
+foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine)
     add_executable(${test} tests/${test}.cpp)
     target_link_libraries(${test} hive_core)
 endforeach()
-
-add_executable(main src/main.cpp)
-target_link_libraries(main hive_core)

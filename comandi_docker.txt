@@ -1,0 +1,8 @@
+Comandi Docker
+1 - apri DockerDesktop
+2 - apri wsl
+3 - vai nella cartella HiveGotThis
+4 - costruisci immagine docker 
+docker build -t hive-bot .
+5 -avvia esecuzione 
+docker run -it --rm hive-bot

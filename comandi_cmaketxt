@@ -1,0 +1,6 @@
+1 - CONFIGURAZIONE
+cmake -B build -S . -G "MinGW Makefiles"
+2 - COMPILAZIONE
+cmake --build build
+3 - ESECUZIONE
+.\build\HiveEngine.exe
