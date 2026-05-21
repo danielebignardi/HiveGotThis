@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "Evaluation.h"
 #include "MCTS.h"
 
 #include <iostream>
@@ -105,6 +106,13 @@ void Engine::Run()
         {
             CommandOptions(param);
         }
+        /*else if (command == CommandString_Features)
+        {
+            if (m_board == nullptr)
+                WriteError(ErrorMessage_NoGameInProgress);
+            else
+                CommandFeatures();
+        }*/
         else if (command == CommandString_Exit)
         {
             break;
@@ -465,6 +473,14 @@ void Engine::CommandOptions(const std::string& param)
     (void)param;
     WriteOk();
 }
+/*
+void Engine::CommandFeatures()
+{
+    GraphFeatures features = ExtractGraphFeatures(*m_board);
+    std::cout << GraphFeaturesToJson(features) << "\n";
+    WriteOk();
+}
+*/
 
 // =============================================================================
 // LOGICA DI GIOCO INTERNA

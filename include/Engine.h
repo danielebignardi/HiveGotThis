@@ -81,6 +81,9 @@ private:
     // "options [get/set ...]" - Gestione opzioni (per ora vuota)
     void CommandOptions(const std::string& param);
 
+    // "features" - Esporta le graph features della board corrente in JSON.
+    void CommandFeatures();
+
     // -------------------------------------------------------------------------
     // LOGICA DI GIOCO INTERNA
     // -------------------------------------------------------------------------

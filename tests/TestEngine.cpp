@@ -454,7 +454,44 @@ void TestOptions()
 }
 
 // =============================================================================
-// SEZIONE 8: COMANDI SCONOSCIUTI
+// SEZIONE 8: COMANDO FEATURES
+// =============================================================================
+void TestFeatures()
+{
+    PrintSection("Comando: features");
+
+    {
+        std::string out = RunEngine("features\n");
+        CHECK("features senza partita: contiene 'err '",
+              out.find("err ") != std::string::npos);
+    }
+
+    {
+        std::string out = RunEngine(
+            "newgame Base;InProgress;White[2];wQ;bQ wQ-\n"
+            "features\n"
+        );
+
+        CHECK("features: contiene node_features",
+              out.find("\"node_features\"") != std::string::npos);
+        CHECK("features: contiene edge_index",
+              out.find("\"edge_index\"") != std::string::npos);
+        CHECK("features: contiene edge_type",
+              out.find("\"edge_type\"") != std::string::npos);
+        CHECK("features: contiene global_features",
+              out.find("\"global_features\"") != std::string::npos);
+        CHECK("features: global_features contiene 5 valori",
+              out.find("\"global_features\":[0.166667,0.166667,0.050000,1.000000,1.000000]") != std::string::npos);
+        CHECK("features: contiene edge di adiacenza",
+              out.find("\"edge_type\":[0,0") != std::string::npos);
+        CHECK("features: nessun errore",
+              out.find("err ") == std::string::npos &&
+              out.find("invalidmove") == std::string::npos);
+    }
+}
+
+// =============================================================================
+// SEZIONE 9: COMANDI SCONOSCIUTI
 // =============================================================================
 void TestUnknownCommand()
 {
@@ -474,7 +511,7 @@ void TestUnknownCommand()
 }
 
 // =============================================================================
-// SEZIONE 9: SESSIONE COMPLETA (partita simulata)
+// SEZIONE 10: SESSIONE COMPLETA (partita simulata)
 // =============================================================================
 void TestFullSession()
 {
@@ -507,7 +544,7 @@ void TestFullSession()
 }
 
 // =============================================================================
-// SEZIONE 10: NEWGAME DA GAMESTRING (ricarica partita)
+// SEZIONE 11: NEWGAME DA GAMESTRING (ricarica partita)
 // =============================================================================
 void TestNewGameFromGameString()
 {
@@ -549,7 +586,7 @@ void TestNewGameFromGameString()
 }
 
 // =============================================================================
-// SEZIONE 11: ROBUSTEZZA (input malformati)
+// SEZIONE 12: ROBUSTEZZA (input malformati)
 // =============================================================================
 void TestRobustness()
 {
@@ -602,6 +639,7 @@ int main()
     TestBestMove();
     TestUndo();
     TestOptions();
+    TestFeatures();
     TestUnknownCommand();
     TestFullSession();
     TestNewGameFromGameString();
