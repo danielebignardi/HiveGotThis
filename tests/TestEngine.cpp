@@ -472,18 +472,16 @@ void TestFeatures()
             "features\n"
         );
 
-        CHECK("features: contiene node_features",
-              out.find("\"node_features\"") != std::string::npos);
+        CHECK("features: contiene x",
+              out.find("\"x\"") != std::string::npos);
         CHECK("features: contiene edge_index",
               out.find("\"edge_index\"") != std::string::npos);
-        CHECK("features: contiene edge_type",
-              out.find("\"edge_type\"") != std::string::npos);
-        CHECK("features: contiene global_features",
-              out.find("\"global_features\"") != std::string::npos);
-        CHECK("features: global_features contiene 5 valori",
-              out.find("\"global_features\":[0.166667,0.166667,0.050000,1.000000,1.000000]") != std::string::npos);
-        CHECK("features: contiene edge di adiacenza",
-              out.find("\"edge_type\":[0,0") != std::string::npos);
+        CHECK("features: contiene edge_attr",
+              out.find("\"edge_attr\"") != std::string::npos);
+        CHECK("features: contiene u",
+              out.find("\"u\"") != std::string::npos);
+        CHECK("features: u contiene 5 valori",
+              out.find("\"u\":[0.166667,0.166667,0.050000,1.000000,1.000000]") != std::string::npos);
         CHECK("features: nessun errore",
               out.find("err ") == std::string::npos &&
               out.find("invalidmove") == std::string::npos);

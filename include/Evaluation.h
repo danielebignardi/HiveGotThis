@@ -4,15 +4,17 @@
 #include "Board.h"
 
 #include <array>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace HiveGotThis
 {
 
-constexpr int GraphFeatureNodeCount = NumPieceNames; 
+constexpr int GraphFeatureNodeCount = NumPieceNames;
 constexpr int GraphFeatureNodeDim = 38;
 constexpr int GraphFeatureGlobalDim = 5;
-constexpr int GraphFeatureMaxEdges = 1024; \\limite massimo di archi che il grafo può contenere.
+constexpr int GraphFeatureMaxEdges = 1024; // limite massimo di archi che il grafo puo' contenere.
 
 enum class GraphEdgeType : int
 {
@@ -29,6 +31,21 @@ struct GraphFeatures
     std::array<int, GraphFeatureMaxEdges> edgeType{};
     int numEdges = 0;
     std::array<float, GraphFeatureGlobalDim> globalFeatures{};
+};
+
+struct GNNInputs
+{
+    // Feature di ogni nodo: [N * 38], con N = NumPieceNames.
+    std::vector<float> x;
+
+    // COO flatten: [2 * E]. Prima tutte le sorgenti, poi tutte le destinazioni.
+    std::vector<int64_t> edge_index;
+
+    // Coordinate relative destinazione-sorgente per arco: [E * 3] = dq, dr, dz.
+    std::vector<float> edge_attr;
+
+    // Stato globale separato per il readout finale: [5].
+    std::vector<float> u;
 };
 
 // Valuta la posizione della board dal punto di vista di `perspective`.
@@ -49,6 +66,12 @@ GraphFeatures ExtractGraphFeatures(const Board& board);
 
 // Serializza le feature in JSON per self-play/training.
 std::string GraphFeaturesToJson(const GraphFeatures& features);
+
+// Estrae il formato flat pronto per GNN/inferenza.
+GNNInputs ExtractGNNInputs(const Board& board);
+
+// Serializza il formato flat pronto per GNN/inferenza.
+std::string GNNInputsToJson(const GNNInputs& inputs);
 
 } // namespace HiveGotThis
 

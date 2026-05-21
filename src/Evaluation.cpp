@@ -189,6 +189,47 @@ static bool IsAdjacentToPiece(const Board& board, PieceName piece, PieceName tar
     return false;
 }
 
+static int PieceStackDepth(const Board& board, PieceName piece)
+{
+    if (!board.PieceInPlay(piece))
+        return 0;
+
+    int depth = 0;
+    PieceName below = board.GetPieceUnder(piece);
+    while (below != PieceName::INVALID)
+    {
+        depth++;
+        below = board.GetPieceUnder(below);
+    }
+
+    return depth;
+}
+
+static void GetRelativeEdgeCoordinates(
+    const Board& board,
+    int source,
+    int destination,
+    float& dq,
+    float& dr,
+    float& dz)
+{
+    dq = 0.0f;
+    dr = 0.0f;
+    dz = 0.0f;
+
+    PieceName sourcePiece = static_cast<PieceName>(source);
+    PieceName destinationPiece = static_cast<PieceName>(destination);
+    if (!board.PieceInPlay(sourcePiece) || !board.PieceInPlay(destinationPiece))
+        return;
+
+    Index sourcePos = board.GetPosition(sourcePiece);
+    Index destinationPos = board.GetPosition(destinationPiece);
+
+    dq = static_cast<float>((destinationPos % BoardWidth) - (sourcePos % BoardWidth));
+    dr = static_cast<float>((destinationPos / BoardWidth) - (sourcePos / BoardWidth));
+    dz = static_cast<float>(PieceStackDepth(board, destinationPiece) - PieceStackDepth(board, sourcePiece));
+}
+
 static int CountLegalMovesForPiece(const Board& board, PieceName piece)
 {
     if (!board.PieceInPlay(piece))
@@ -929,6 +970,117 @@ std::string GraphFeaturesToJson(const GraphFeatures& features)
     ss << "],";
 
     ss << "\"num_edges\":" << features.numEdges;
+    ss << "}";
+    return ss.str();
+}
+
+// Input completo per la GNN.
+// x contiene le feature dei nodi in formato flat: per ogni pezzo nominale
+// vengono salvate 38 feature consecutive, quindi x ha dimensione
+// NumPieceNames * GraphFeatureNodeDim.
+//
+// edge_index contiene gli archi in formato COO flat: prima tutte le sorgenti
+// e poi tutte le destinazioni. Se E e' il numero di archi, allora
+// edge_index ha dimensione 2 * E:
+//   edge_index[0..E-1]     = nodi sorgente
+//   edge_index[E..2*E-1]   = nodi destinazione
+//
+// edge_attr contiene gli attributi spaziali degli archi. (archi con coordinate geometriche) Per ogni arco salva
+// tre valori consecutivi: dq, dr, dz, cioe' la differenza di coordinate tra
+// destinazione e sorgente. Ha dimensione E * 3.
+//
+// u contiene le feature globali della posizione, passate direttamente al
+// readout finale: [mia_regina_circ, nemica_regina_circ, turno_norm,
+// mia_regina_in_gioco, nemica_regina_in_gioco].
+GNNInputs ExtractGNNInputs(const Board& board)
+{
+    GraphFeatures features = ExtractGraphFeatures(board);
+    GNNInputs inputs;
+
+    inputs.x.reserve(GraphFeatureNodeCount * GraphFeatureNodeDim);
+    for (int n = 0; n < GraphFeatureNodeCount; n++)
+    {
+        for (int f = 0; f < GraphFeatureNodeDim; f++)
+            inputs.x.push_back(features.nodeFeatures[n][f]);
+    }
+
+    inputs.u.reserve(GraphFeatureGlobalDim);
+    for (int f = 0; f < GraphFeatureGlobalDim; f++)
+        inputs.u.push_back(features.globalFeatures[f]);
+
+    std::vector<int64_t> sources;
+    std::vector<int64_t> destinations;
+    sources.reserve(features.numEdges + GraphFeatureNodeCount);
+    destinations.reserve(features.numEdges + GraphFeatureNodeCount);
+    inputs.edge_attr.reserve((features.numEdges + GraphFeatureNodeCount) * 3);
+
+    auto addFlatEdge = [&](int source, int destination)
+    {
+        float dq = 0.0f;
+        float dr = 0.0f;
+        float dz = 0.0f;
+        GetRelativeEdgeCoordinates(board, source, destination, dq, dr, dz);
+
+        sources.push_back(static_cast<int64_t>(source));
+        destinations.push_back(static_cast<int64_t>(destination));
+        inputs.edge_attr.push_back(dq);
+        inputs.edge_attr.push_back(dr);
+        inputs.edge_attr.push_back(dz);
+    };
+
+    for (int e = 0; e < features.numEdges; e++)
+        addFlatEdge(features.edgeFrom[e], features.edgeTo[e]);
+
+    for (int n = 0; n < GraphFeatureNodeCount; n++)
+        addFlatEdge(n, n);
+
+    inputs.edge_index.reserve(sources.size() * 2);
+    for (int64_t source : sources)
+        inputs.edge_index.push_back(source);
+    for (int64_t destination : destinations)
+        inputs.edge_index.push_back(destination);
+
+    return inputs;
+}
+
+std::string GNNInputsToJson(const GNNInputs& inputs)
+{
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6);
+    ss << "{";
+
+    ss << "\"x\":[";
+    for (size_t i = 0; i < inputs.x.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.x[i];
+    }
+    ss << "],";
+
+    ss << "\"edge_index\":[";
+    for (size_t i = 0; i < inputs.edge_index.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.edge_index[i];
+    }
+    ss << "],";
+
+    ss << "\"edge_attr\":[";
+    for (size_t i = 0; i < inputs.edge_attr.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.edge_attr[i];
+    }
+    ss << "],";
+
+    ss << "\"u\":[";
+    for (size_t i = 0; i < inputs.u.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.u[i];
+    }
+    ss << "]";
+
     ss << "}";
     return ss.str();
 }
