@@ -3,8 +3,50 @@
 
 #include "Board.h"
 
+#include <array>
+#include <cstdint>
+#include <string>
+#include <vector>
+
 namespace HiveGotThis
 {
+
+constexpr int GraphFeatureNodeCount = NumPieceNames;
+constexpr int GraphFeatureNodeDim = 38;
+constexpr int GraphFeatureGlobalDim = 5;
+constexpr int GraphFeatureMaxEdges = 1024; // limite massimo di archi che il grafo puo' contenere.
+
+enum class GraphEdgeType : int
+{
+    Adjacent = 0,
+    StackedOn = 1,
+    SameColor = 2
+};
+
+struct GraphFeatures
+{
+    std::array<std::array<float, GraphFeatureNodeDim>, GraphFeatureNodeCount> nodeFeatures{};
+    std::array<int, GraphFeatureMaxEdges> edgeFrom{};
+    std::array<int, GraphFeatureMaxEdges> edgeTo{};
+    std::array<int, GraphFeatureMaxEdges> edgeType{};
+    int numEdges = 0;
+    std::array<float, GraphFeatureGlobalDim> globalFeatures{};
+};
+
+struct GNNInputs
+{
+    // Feature di ogni nodo: [N * 38], con N = NumPieceNames.
+    std::vector<float> x;
+
+    // COO flatten: [2 * E]. Prima tutte le sorgenti, poi tutte le destinazioni.
+    std::vector<int64_t> edge_index;
+
+    // Coordinate relative destinazione-sorgente per arco: [E * 3] = dq, dr, dz.
+    std::vector<float> edge_attr;
+
+    // Stato globale separato per il readout finale: [5].
+    std::vector<float> u;
+};
 
 // Valuta la posizione della board dal punto di vista di `perspective`.
 // Restituisce un valore in [0.0, 1.0]:
@@ -18,6 +60,18 @@ double EvaluateBoard(const Board& board, Color perspective);
 // Punteggio piu' alto = mossa piu' promettente.
 // board deve essere lo stato PRIMA della mossa.
 double EvaluateMove(const Board& board, const Move& move, Color perspective);
+
+// Estrae la rappresentazione graph-based con 38 feature per nodo.
+GraphFeatures ExtractGraphFeatures(const Board& board);
+
+// Serializza le feature in JSON per self-play/training.
+std::string GraphFeaturesToJson(const GraphFeatures& features);
+
+// Estrae il formato flat pronto per GNN/inferenza.
+GNNInputs ExtractGNNInputs(const Board& board);
+
+// Serializza il formato flat pronto per GNN/inferenza.
+std::string GNNInputsToJson(const GNNInputs& inputs);
 
 } // namespace HiveGotThis
 

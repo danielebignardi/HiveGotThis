@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
+#include <unordered_set>
 
 namespace HiveGotThis
 {
@@ -80,7 +83,7 @@ static double PieceDevelopmentValue(BugType type)
 
 
 // =============================================================================
-// FUNZIONI HELPER
+// FUNZIONI HELPER -> SERVONO PER LE FEATURES E INPUT DELLA GNN
 // =============================================================================
 
 static int CountOccupiedNeighbors(const Board& board, Index pos)
@@ -94,6 +97,214 @@ static int CountOccupiedNeighbors(const Board& board, Index pos)
     }
     return count;
 }
+
+static void AddGraphEdge(GraphFeatures& gf, int from, int to, GraphEdgeType type)
+{
+    if (gf.numEdges >= GraphFeatureMaxEdges)
+        return;
+
+    gf.edgeFrom[gf.numEdges] = from;
+    gf.edgeTo[gf.numEdges] = to;
+    gf.edgeType[gf.numEdges] = static_cast<int>(type);
+    gf.numEdges++;
+}
+
+static int GraphBugFeatureIndex(BugType type)
+{
+    switch (type)
+    {
+        case BugType::QueenBee:    return 0;
+        case BugType::SoldierAnt:  return 1;
+        case BugType::Spider:      return 2;
+        case BugType::Grasshopper: return 3;
+        case BugType::Beetle:      return 4;
+        case BugType::Mosquito:    return 5;
+        case BugType::Ladybug:     return 6;
+        case BugType::Pillbug:     return 7;
+        default:                   return -1;
+    }
+}
+
+static double MobilityNormalizer(BugType type)
+{
+    switch (type)
+    {
+        case BugType::QueenBee:    return 6.0;
+        case BugType::SoldierAnt:  return 14.0;
+        case BugType::Spider:      return 6.0;
+        case BugType::Grasshopper: return 8.0;
+        case BugType::Beetle:      return 6.0;
+        case BugType::Mosquito:    return 14.0;
+        case BugType::Ladybug:     return 8.0;
+        case BugType::Pillbug:     return 6.0;
+        default:                   return 1.0;
+    }
+}
+
+static Color OpponentOf(Color color)
+{
+    return (color == Color::White) ? Color::Black : Color::White;
+}
+
+static PieceName QueenOf(Color color)
+{
+    return (color == Color::White) ? PieceName::wQ : PieceName::bQ;
+}
+// Calcola la distanza esagonale tra due celle convertendo l'indice 1D in coordinate assiali (q,r), ricavando la terza coordinata cubica implicitamente, e normalizzando il risultato su un raggio massimo.
+static int HexDistance(Index a, Index b)
+{
+    int aq = a % BoardWidth;
+    int ar = a / BoardWidth;
+    int bq = b % BoardWidth;
+    int br = b / BoardWidth;
+    int dq = aq - bq;
+    int dr = ar - br;
+    return (std::abs(dq) + std::abs(dr) + std::abs(dq + dr)) / 2;
+}
+//Calcola la distanza esagonale reale tra il pezzo e la regina.
+static float NormalizedHexDistance(const Board& board, PieceName piece, PieceName queen)
+{
+    static constexpr float MaxQueenDistance = 10.0f;
+
+    if (!board.PieceInPlay(piece) || !board.PieceInPlay(queen))
+        return 1.0f;
+
+    float distance = static_cast<float>(HexDistance(board.GetPosition(piece), board.GetPosition(queen)));
+    return std::min(1.0f, distance / MaxQueenDistance);
+}
+
+static bool IsAdjacentToPiece(const Board& board, PieceName piece, PieceName target)
+{
+    if (!board.PieceInPlay(piece) || !board.PieceInPlay(target))
+        return false;
+
+    Index pos = board.GetPosition(piece);
+    Index targetPos = board.GetPosition(target);
+    for (int d = 0; d < 6; d++)
+    {
+        if (pos + NeighborOffsets[d] == targetPos)
+            return true;
+    }
+
+    return false;
+}
+
+static int PieceStackDepth(const Board& board, PieceName piece)
+{
+    if (!board.PieceInPlay(piece))
+        return 0;
+
+    int depth = 0;
+    PieceName below = board.GetPieceUnder(piece);
+    while (below != PieceName::INVALID)
+    {
+        depth++;
+        below = board.GetPieceUnder(below);
+    }
+
+    return depth;
+}
+
+static void GetRelativeEdgeCoordinates(
+    const Board& board,
+    int source,
+    int destination,
+    float& dq,
+    float& dr,
+    float& dz)
+{
+    dq = 0.0f;
+    dr = 0.0f;
+    dz = 0.0f;
+
+    PieceName sourcePiece = static_cast<PieceName>(source);
+    PieceName destinationPiece = static_cast<PieceName>(destination);
+    if (!board.PieceInPlay(sourcePiece) || !board.PieceInPlay(destinationPiece))
+        return;
+
+    Index sourcePos = board.GetPosition(sourcePiece);
+    Index destinationPos = board.GetPosition(destinationPiece);
+
+    dq = static_cast<float>((destinationPos % BoardWidth) - (sourcePos % BoardWidth));
+    dr = static_cast<float>((destinationPos / BoardWidth) - (sourcePos / BoardWidth));
+    dz = static_cast<float>(PieceStackDepth(board, destinationPiece) - PieceStackDepth(board, sourcePiece));
+}
+
+static int CountLegalMovesForPiece(const Board& board, PieceName piece)
+{
+    if (!board.PieceInPlay(piece))
+        return 0;
+    if (!board.PieceIsOnTop(piece))
+        return 0;
+    if (board.cannotBeMoved[piece])
+        return 0;
+
+    std::vector<Move> moves;
+    switch (GetBugType(piece))
+    {
+        case BugType::QueenBee:    board.GetQueenBeeMoves(piece, moves);    break;
+        case BugType::SoldierAnt:  board.GetSoldierAntMoves(piece, moves);  break;
+        case BugType::Spider:      board.GetSpiderMoves(piece, moves);      break;
+        case BugType::Grasshopper: board.GetGrasshopperMoves(piece, moves); break;
+        case BugType::Beetle:      board.GetBeetleMoves(piece, moves);      break;
+        case BugType::Mosquito:    board.GetMosquitoMoves(piece, moves);    break;
+        case BugType::Ladybug:     board.GetLadybugMoves(piece, moves);     break;
+        case BugType::Pillbug:     board.GetPillbugMoves(piece, moves);     break;
+        default: break;
+    }
+
+    std::unordered_set<size_t> seen;
+    for (const Move& move : moves)
+        seen.insert(hash(move));
+
+    return static_cast<int>(seen.size());
+}
+
+static float MobilityScore(const Board& board, PieceName piece)
+{
+    if (!board.PieceInPlay(piece))
+        return -1.0f;
+
+    double normalizer = MobilityNormalizer(GetBugType(piece));
+    double score = static_cast<double>(CountLegalMovesForPiece(board, piece)) / normalizer;
+    return static_cast<float>(std::min(1.0, score));
+}
+
+static int CountInHandByType(const Board& board, Color color, BugType type)
+{
+    int count = 0;
+    PieceName start = (color == Color::White) ? PieceName::wQ : PieceName::bQ;
+    PieceName end = (color == Color::White) ? PieceName::wP : PieceName::bP;
+
+    for (uint8_t p = start; p <= end; p++)
+    {
+        PieceName piece = static_cast<PieceName>(p);
+        if (!PieceNameIsEnabledForGameType(piece, board.gameType))
+            continue;
+        if (GetBugType(piece) == type && board.PieceInHand(piece))
+            count++;
+    }
+
+    return count;
+}
+
+static void FillInventoryFeatures(const Board& board, Color color, std::array<float, 8>& out)
+{
+    out[0] = static_cast<float>(CountInHandByType(board, color, BugType::QueenBee));
+    out[1] = static_cast<float>(CountInHandByType(board, color, BugType::SoldierAnt)) / 3.0f;
+    out[2] = static_cast<float>(CountInHandByType(board, color, BugType::Spider)) / 2.0f;
+    out[3] = static_cast<float>(CountInHandByType(board, color, BugType::Grasshopper)) / 3.0f;
+    out[4] = static_cast<float>(CountInHandByType(board, color, BugType::Beetle)) / 2.0f;
+    out[5] = static_cast<float>(CountInHandByType(board, color, BugType::Mosquito));
+    out[6] = static_cast<float>(CountInHandByType(board, color, BugType::Ladybug));
+    out[7] = static_cast<float>(CountInHandByType(board, color, BugType::Pillbug));
+}
+
+
+
+/*
+QUA FINISCONO LE FUNZIONI CHE HO AGGIUNTO PER FEATURES GNN
+*/
 
 // Conta le direzioni in cui la regina puo' effettivamente scivolare via (CanSlide ground)
 static int CountQueenSlideEscapes(const Board& board, Index queenPos)
@@ -554,6 +765,324 @@ double EvaluateMove(const Board& board, const Move& move, Color perspective)
     }
 
     return 1.0 / (1.0 + std::exp(-score * SIGMOID_K_MOVE));
+}
+
+
+
+/*
+FUNZIONI PER ESTRAZIONI FEATURE GNN E CREAZIONE JSON
+*/
+
+GraphFeatures ExtractGraphFeatures(const Board& board)
+{
+    GraphFeatures gf;
+    //Raccolta informazioni generali per capire di chi è il turno e di chi è la regina, per calcolare le feature in modo coerente
+    Color myColor = board.currentColor;
+    Color enemyColor = OpponentOf(myColor);
+    PieceName myQueen = QueenOf(myColor);
+    PieceName enemyQueen = QueenOf(enemyColor);
+
+    // Calcola se la regina è in gioco, da quanti pezzi è circondata per entrambe le parti, normalizzato a [0,1]
+    float myQueenSurround = board.PieceInPlay(myQueen)
+        ? static_cast<float>(CountOccupiedNeighbors(board, board.GetPosition(myQueen))) / 6.0f
+        : 0.0f;
+    float enemyQueenSurround = board.PieceInPlay(enemyQueen)
+        ? static_cast<float>(CountOccupiedNeighbors(board, board.GetPosition(enemyQueen))) / 6.0f
+        : 0.0f;
+
+    // Inventario dei pezzi in mano per entrambe le parti   
+    std::array<float, 8> myInventory{};
+    std::array<float, 8> enemyInventory{};
+    FillInventoryFeatures(board, myColor, myInventory);
+    FillInventoryFeatures(board, enemyColor, enemyInventory);
+
+    // Vettore globale separato u: contesto macro passato al readout finale.
+    gf.globalFeatures[0] = myQueenSurround;
+    gf.globalFeatures[1] = enemyQueenSurround;
+    gf.globalFeatures[2] = static_cast<float>(board.GetCurrentTurn()) / 40.0f;
+    gf.globalFeatures[3] = board.PieceInPlay(myQueen) ? 1.0f : 0.0f;
+    gf.globalFeatures[4] = board.PieceInPlay(enemyQueen) ? 1.0f : 0.0f;
+
+    // Estrazione delle feature per ogni pezzo
+    for (int p = 0; p < NumPieceNames; p++)
+    {
+        PieceName piece = static_cast<PieceName>(p);
+        BugType type = GetBugType(piece);
+        Color color = GetColor(piece);
+        int typeFeature = GraphBugFeatureIndex(type); //funzione di mapping: prende il tipo di insetto (BugType) e restituisce quale indice tra 0 e 7 deve essere impostato a 1.0 (definita sopra riga 124)
+
+        if (typeFeature >= 0)
+            gf.nodeFeatures[p][typeFeature] = 1.0f;
+
+        gf.nodeFeatures[p][8] = (color == myColor) ? 1.0f : -1.0f;
+        //se il pezzo è ancora in mano, restituisce -1.0f;
+        //se il pezzo è sul tavolo, conta quante mosse legali può fare;   //CountLegalMovesForPiece(board, piece)
+        //divide quel numero per il massimo teorico del tipo di insetto; //MobilityNormalizer(GetBugType(piece))
+        //taglia il valore massimo a 1.0
+        gf.nodeFeatures[p][12] = MobilityScore(board, piece); //(riga 219)
+
+
+        gf.nodeFeatures[p][19] = board.PieceInPlay(piece) ? 1.0f : 0.0f; //Piece in play funzione definita in board se il pezzo è in gioco è pari a 1 altrimenti è pari a 0
+        gf.nodeFeatures[p][20] = myQueenSurround; //riga 733 -> num pezzi attorno alla mia regina
+        gf.nodeFeatures[p][21] = enemyQueenSurround; //riga 736 -> num pezzi attorno alla regina avversaria
+
+        //Inventario dei pezzi in mano per entrambe le parti 
+        //myInventory[22] = Ape/Regina ancora in mano: 1.0 oppure 0.0
+        //myInventory[23] = Formiche in mano / 3.0
+        //myInventory[2] = Ragni in mano / 2.0
+        for (int i = 0; i < 8; i++)
+        {
+            gf.nodeFeatures[p][22 + i] = myInventory[i];
+            gf.nodeFeatures[p][30 + i] = enemyInventory[i];
+        }
+
+        //Se il pezzo non è sul tavolo, salta il resto del ciclo e passa al prossimo pezzo
+        if (!board.PieceInPlay(piece))
+            continue;
+        //Features che dipendono dalla posizione reale del pezzo
+        Index pos = board.GetPosition(piece); // posizione
+        bool isOnTop = board.PieceIsOnTop(piece); //pezzo on top
+        bool breaksHive = !board.CanMoveWithoutBreakingHive(piece); //muovere il pezzo rompe la regola one-hive?
+
+        gf.nodeFeatures[p][9] = static_cast<float>(CountOccupiedNeighbors(board, pos)) / 6.0f; //numero di pezzi adiacenti/6
+        gf.nodeFeatures[p][10] = static_cast<float>(std::max(0, static_cast<int>(board.stackHeight[pos]) - 1)) / 3.0f; //altezza dello stack
+        //stackHeight = 1 -> (1 - 1) / 3 = 0.0
+        // stackHeight = 2 -> (2 - 1) / 3 = 0.333
+        //stackHeight = 3 -> (3 - 1) / 3 = 0.666
+        //stackHeight = 4 -> (4 - 1) / 3 = 1.0
+        gf.nodeFeatures[p][11] = isOnTop ? 1.0f : 0.0f; //è in cima allo stack?
+        //Feature [13]: Is Pinned.
+        //Vale 1.0 se almeno una di queste condizioni è vera:
+        //il pezzo non è in cima alla pila;
+        // il pezzo è bloccato da cannotBeMoved;
+        //il pezzo non ha nessuna mossa legale.
+        gf.nodeFeatures[p][13] = (!isOnTop || board.cannotBeMoved[piece] || CountLegalMovesForPiece(board, piece) == 0) ? 1.0f : 0.0f;
+        // Feature [14]: Breaks Hive. Vale 1.0 se muovere il pezzo romperebbe l'hive, altrimenti 0.0. 
+        gf.nodeFeatures[p][14] = breaksHive ? 1.0f : 0.0f;
+        //Feature [15]: distanza dalla mia regina, normalizzata.
+        gf.nodeFeatures[p][15] = NormalizedHexDistance(board, piece, myQueen); //funzione riga 165
+        //Feature [16]: distanza dalla regina avversaria, normalizzata.
+        gf.nodeFeatures[p][16] = NormalizedHexDistance(board, piece, enemyQueen);
+        gf.nodeFeatures[p][17] = IsAdjacentToPiece(board, piece, myQueen) ? 1.0f : 0.0f; //pezzo tocca la mia regina?
+        gf.nodeFeatures[p][18] = IsAdjacentToPiece(board, piece, enemyQueen) ? 1.0f : 0.0f; //pezzo tocca la regina avversaria?
+    }
+
+    for (int p1 = 0; p1 < NumPieceNames; p1++)
+    {
+        PieceName piece1 = static_cast<PieceName>(p1);
+        //se il pezzo non è in gioco, salta al prossimo pezzo perchè non puo' avere archi
+        if (!board.PieceInPlay(piece1))
+            continue;
+
+        Index pos1 = board.GetPosition(piece1);
+        //Confronta piece1 con tutti i pezzi successivi:
+        for (int p2 = p1 + 1; p2 < NumPieceNames; p2++)
+        {
+            PieceName piece2 = static_cast<PieceName>(p2);
+            if (!board.PieceInPlay(piece2))
+                continue;
+            //Controlla le 6 direzioni esagonali attorno a piece1
+            Index pos2 = board.GetPosition(piece2);
+            for (int d = 0; d < 6; d++)
+            {
+                //Se piece2 si trova in una delle 6 celle vicine a piece1, allora i due pezzi sono adiacenti.
+                if (pos1 + NeighborOffsets[d] == pos2)
+                {
+                    //aggiungo due archi perchè relazione bidirezionale
+                    AddGraphEdge(gf, p1, p2, GraphEdgeType::Adjacent);
+                    AddGraphEdge(gf, p2, p1, GraphEdgeType::Adjacent);
+                    break;
+                }
+            }
+        }
+        //Controlla se piece1 è sopra un altro pezzo (stacked) e aggiunge un arco StackedOn
+        PieceName below = board.GetPieceUnder(piece1);
+        if (below != PieceName::INVALID)
+            AddGraphEdge(gf, p1, static_cast<int>(below), GraphEdgeType::StackedOn);
+    }
+    /*
+    for (int p1 = 0; p1 < NumPieceNames; p1++)
+    {
+        PieceName piece1 = static_cast<PieceName>(p1);
+        for (int p2 = p1 + 1; p2 < NumPieceNames; p2++)
+        {
+            PieceName piece2 = static_cast<PieceName>(p2);
+            if (GetColor(piece1) != GetColor(piece2))
+                continue;
+
+            AddGraphEdge(gf, p1, p2, GraphEdgeType::SameColor);
+            AddGraphEdge(gf, p2, p1, GraphEdgeType::SameColor);
+        }
+    }
+    */
+
+    return gf;
+}
+
+std::string GraphFeaturesToJson(const GraphFeatures& features)
+{
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6);
+    ss << "{";
+
+    ss << "\"node_features\":[";
+    for (int n = 0; n < GraphFeatureNodeCount; n++)
+    {
+        if (n > 0) ss << ",";
+        ss << "[";
+        for (int f = 0; f < GraphFeatureNodeDim; f++)
+        {
+            if (f > 0) ss << ",";
+            ss << features.nodeFeatures[n][f];
+        }
+        ss << "]";
+    }
+    ss << "],";
+
+    ss << "\"edge_index\":[[";
+    for (int e = 0; e < features.numEdges; e++)
+    {
+        if (e > 0) ss << ",";
+        ss << features.edgeFrom[e];
+    }
+    ss << "],[";
+    for (int e = 0; e < features.numEdges; e++)
+    {
+        if (e > 0) ss << ",";
+        ss << features.edgeTo[e];
+    }
+    ss << "]],";
+
+    ss << "\"edge_type\":[";
+    for (int e = 0; e < features.numEdges; e++)
+    {
+        if (e > 0) ss << ",";
+        ss << features.edgeType[e];
+    }
+    ss << "],";
+
+    ss << "\"global_features\":[";
+    for (int f = 0; f < GraphFeatureGlobalDim; f++)
+    {
+        if (f > 0) ss << ",";
+        ss << features.globalFeatures[f];
+    }
+    ss << "],";
+
+    ss << "\"num_edges\":" << features.numEdges;
+    ss << "}";
+    return ss.str();
+}
+
+// Input completo per la GNN.
+// x contiene le feature dei nodi in formato flat: per ogni pezzo nominale
+// vengono salvate 38 feature consecutive, quindi x ha dimensione
+// NumPieceNames * GraphFeatureNodeDim.
+//
+// edge_index contiene gli archi in formato COO flat: prima tutte le sorgenti
+// e poi tutte le destinazioni. Se E e' il numero di archi, allora
+// edge_index ha dimensione 2 * E:
+//   edge_index[0..E-1]     = nodi sorgente
+//   edge_index[E..2*E-1]   = nodi destinazione
+//
+// edge_attr contiene gli attributi spaziali degli archi. (archi con coordinate geometriche) Per ogni arco salva
+// tre valori consecutivi: dq, dr, dz, cioe' la differenza di coordinate tra
+// destinazione e sorgente. Ha dimensione E * 3.
+//
+// u contiene le feature globali della posizione, passate direttamente al
+// readout finale: [mia_regina_circ, nemica_regina_circ, turno_norm,
+// mia_regina_in_gioco, nemica_regina_in_gioco].
+GNNInputs ExtractGNNInputs(const Board& board)
+{
+    GraphFeatures features = ExtractGraphFeatures(board);
+    GNNInputs inputs;
+
+    inputs.x.reserve(GraphFeatureNodeCount * GraphFeatureNodeDim);
+    for (int n = 0; n < GraphFeatureNodeCount; n++)
+    {
+        for (int f = 0; f < GraphFeatureNodeDim; f++)
+            inputs.x.push_back(features.nodeFeatures[n][f]);
+    }
+
+    inputs.u.reserve(GraphFeatureGlobalDim);
+    for (int f = 0; f < GraphFeatureGlobalDim; f++)
+        inputs.u.push_back(features.globalFeatures[f]);
+
+    std::vector<int64_t> sources;
+    std::vector<int64_t> destinations;
+    sources.reserve(features.numEdges + GraphFeatureNodeCount);
+    destinations.reserve(features.numEdges + GraphFeatureNodeCount);
+    inputs.edge_attr.reserve((features.numEdges + GraphFeatureNodeCount) * 3);
+
+    auto addFlatEdge = [&](int source, int destination)
+    {
+        float dq = 0.0f;
+        float dr = 0.0f;
+        float dz = 0.0f;
+        GetRelativeEdgeCoordinates(board, source, destination, dq, dr, dz);
+
+        sources.push_back(static_cast<int64_t>(source));
+        destinations.push_back(static_cast<int64_t>(destination));
+        inputs.edge_attr.push_back(dq);
+        inputs.edge_attr.push_back(dr);
+        inputs.edge_attr.push_back(dz);
+    };
+
+    for (int e = 0; e < features.numEdges; e++)
+        addFlatEdge(features.edgeFrom[e], features.edgeTo[e]);
+
+    for (int n = 0; n < GraphFeatureNodeCount; n++)
+        addFlatEdge(n, n);
+
+    inputs.edge_index.reserve(sources.size() * 2);
+    for (int64_t source : sources)
+        inputs.edge_index.push_back(source);
+    for (int64_t destination : destinations)
+        inputs.edge_index.push_back(destination);
+
+    return inputs;
+}
+
+std::string GNNInputsToJson(const GNNInputs& inputs)
+{
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6);
+    ss << "{";
+
+    ss << "\"x\":[";
+    for (size_t i = 0; i < inputs.x.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.x[i];
+    }
+    ss << "],";
+
+    ss << "\"edge_index\":[";
+    for (size_t i = 0; i < inputs.edge_index.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.edge_index[i];
+    }
+    ss << "],";
+
+    ss << "\"edge_attr\":[";
+    for (size_t i = 0; i < inputs.edge_attr.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.edge_attr[i];
+    }
+    ss << "],";
+
+    ss << "\"u\":[";
+    for (size_t i = 0; i < inputs.u.size(); i++)
+    {
+        if (i > 0) ss << ",";
+        ss << inputs.u[i];
+    }
+    ss << "]";
+
+    ss << "}";
+    return ss.str();
 }
 
 } // namespace HiveGotThis

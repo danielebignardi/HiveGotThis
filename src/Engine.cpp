@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "Evaluation.h"
 #include "MCTS.h"
 
 #include <iostream>
@@ -104,6 +105,13 @@ void Engine::Run()
         else if (command == CommandString_Options)
         {
             CommandOptions(param);
+        }
+        else if (command == CommandString_Features)
+        {
+            if (m_board == nullptr)
+                WriteError(ErrorMessage_NoGameInProgress);
+            else
+                CommandFeatures();
         }
         else if (command == CommandString_Exit)
         {
@@ -463,6 +471,12 @@ void Engine::CommandOptions(const std::string& param)
 {
     // Nessuna opzione configurabile per ora.
     (void)param;
+    WriteOk();
+}
+void Engine::CommandFeatures()
+{
+    GNNInputs inputs = ExtractGNNInputs(*m_board);
+    std::cout << GNNInputsToJson(inputs) << "\n";
     WriteOk();
 }
 
