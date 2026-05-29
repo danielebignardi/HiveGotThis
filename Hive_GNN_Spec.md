@@ -12,7 +12,7 @@ This document is the single source of truth for the state→graph encoding, shar
 2. **Strict local / global separation.** A *node*'s features describe **only** that piece and its immediate neighborhood. Anything constant across the whole board (hand inventories, turn, queen status) lives **only** in the global vector `u`, injected at the readout. No global information is replicated on nodes — that dilutes the signal and wastes message-passing capacity.
 3. **Only on-board pieces are nodes** (including buried pieces under a stack). Pieces in hand are **not** nodes — they would be isolated, geometry-free nodes that pollute the pooling. Hand availability is encoded entirely in `u`.
 4. **Canonical perspective.** The state is always seen from the **side to move** (MINE = +1, opponent = −1). The produced value is "how good the position is for the side to move."
-5. **Absolute C++/Python parity.** The same state must yield identical tensors on both sides. See §9.
+5. **One encoder, in C++.** Feature computation needs Hive logic (articulation points, the pinned check, degrees), which lives in C++, and the encoder must run in C++ for inference anyway. The same C++ encoder also serializes tensors for training, so there is no second encoder to keep in sync. The validation that matters is therefore export fidelity (the exported model reproduces the trained model), not C++/Python encoder parity. See §9 and the interaction spec.
 
 ---
 
@@ -244,6 +244,6 @@ A position and its dihedral-`D6` transforms (6 rotations of 60° × 2 reflection
 ## 11. De-risking checklist (recommended order)
 
 1. **Integration before model quality.** Run an **untrained** network inside the C++ MCTS first.
-2. **C++ ↔ Python parity test:** same state → `encode()` in C++ and in Python must produce **element-for-element identical** `x`, `edge_index`, `edge_attr`, `u` (automated test, tolerance ~1e-6). This is the classic, most expensive failure mode: discovering after training that the two encodings don't match.
+2. **Export-fidelity check (do this with the untrained network):** export the model to TorchScript and confirm the exported model reproduces the eager model's output on the same input (tolerance ~1e-5). With a single C++ encoder there is no dual-encoder parity to test; the real risk shifts to PyG/TorchScript export compatibility, so surface it here with a dummy model — before any training time is spent.
 3. **Verify batching** and per-move MCTS latency with the network in the loop.
 4. **Only then** tune the architecture and start the self-play loop.
