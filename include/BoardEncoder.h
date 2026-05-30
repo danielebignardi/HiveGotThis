@@ -4,6 +4,7 @@
 #include "Board.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace HiveGotThis
@@ -54,6 +55,11 @@ public:
     // Only on-board pieces become nodes; pieces in hand appear only in u.
     static GNNGraph encode(const Board& board);
 };
+
+// Serialize an encoded graph to JSON (keys: x, edge_index, edge_attr, u) for
+// self-play / training export via the `features` UHP command. See
+// Hive_GNN_Spec.md §6 and Hive_Python_Cpp_Interaction.md.
+std::string GNNGraphToJson(const GNNGraph& graph);
 
 } // namespace HiveGotThis
 

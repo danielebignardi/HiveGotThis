@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include "Evaluation.h"
+#include "BoardEncoder.h"
 #include "MCTS.h"
 
 #include <iostream>
@@ -475,8 +476,8 @@ void Engine::CommandOptions(const std::string& param)
 }
 void Engine::CommandFeatures()
 {
-    GNNInputs inputs = ExtractGNNInputs(*m_board);
-    std::cout << GNNInputsToJson(inputs) << "\n";
+    GNNGraph graph = BoardEncoder::encode(*m_board);
+    std::cout << GNNGraphToJson(graph) << "\n";
     WriteOk();
 }
 

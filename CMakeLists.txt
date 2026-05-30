@@ -12,6 +12,7 @@ add_library(hive_core
     src/Engine.cpp
     src/Evaluation.cpp
     src/MCTS.cpp
+    src/BoardEncoder.cpp
 )
 
 # Eseguibile principale (il bot UHP)
@@ -19,7 +20,7 @@ add_executable(HiveEngine src/main.cpp)
 target_link_libraries(HiveEngine hive_core)
 
 # Test (escluso TestMoves: usa API Unix non disponibili su Windows)
-foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine)
+foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestIsPinned TestEncoderShapes TestEdgeAlignment)
     add_executable(${test} tests/${test}.cpp)
     target_link_libraries(${test} hive_core)
 endforeach()

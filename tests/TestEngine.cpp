@@ -480,8 +480,22 @@ void TestFeatures()
               out.find("\"edge_attr\"") != std::string::npos);
         CHECK("features: contiene u",
               out.find("\"u\"") != std::string::npos);
-        CHECK("features: u contiene 5 valori",
-              out.find("\"u\":[0.166667,0.166667,0.050000,1.000000,1.000000]") != std::string::npos);
+        // The GNN-spec global vector u now has exactly 21 elements
+        // (BoardEncoder / Hive_GNN_Spec.md §4). Count the values in the u array.
+        int uCount = 0;
+        size_t uPos = out.find("\"u\":[");
+        if (uPos != std::string::npos)
+        {
+            size_t start = uPos + 5;
+            size_t end   = out.find(']', start);
+            if (end != std::string::npos && end > start)
+            {
+                uCount = 1;
+                for (size_t i = start; i < end; ++i)
+                    if (out[i] == ',') ++uCount;
+            }
+        }
+        CHECK("features: u contiene 21 valori", uCount == 21);
         CHECK("features: nessun errore",
               out.find("err ") == std::string::npos &&
               out.find("invalidmove") == std::string::npos);

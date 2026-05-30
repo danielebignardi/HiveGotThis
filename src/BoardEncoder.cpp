@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <vector>
 
 namespace HiveGotThis
@@ -93,21 +95,46 @@ static bool isPinned(const Board& board, PieceName piece, bool isOnTop, bool bre
     if (board.cannotBeMoved[piece])
         return true;
 
-    switch (GetBugType(piece))
+    BugType type = GetBugType(piece);
+
+    // Gestione speciale per la Zanzara: si comporta da "strisciante" 
+    // se non tocca nessun insetto in grado di saltare o arrampicarsi.
+    if (type == BugType::Mosquito)
     {
-        case BugType::QueenBee:
-        case BugType::SoldierAnt:
-        case BugType::Spider:
-        case BugType::Pillbug:
-            break; // ground sliders: fall through to the gate check
-        default:
-            return false; // grasshopper / beetle / ladybug / mosquito
+        bool hasJumperAbility = false;
+        Index pos = board.GetPosition(piece);
+        for (int d = 0; d < 6; ++d)
+        {
+            Index nbPos = pos + NeighborOffsets[d];
+            if (IsValidIndex(nbPos) && board.HasPieceAt(nbPos))
+            {
+                PieceName neighbor = board.GetPieceAt(nbPos); // Il pezzo in cima a quella cella
+                BugType nType = GetBugType(neighbor);
+                if (nType == BugType::Grasshopper || nType == BugType::Beetle || nType == BugType::Ladybug)
+                {
+                    hasJumperAbility = true;
+                    break;
+                }
+            }
+        }
+        
+        // Se ha l'abilità di saltare/arrampicarsi, non soffre la Gate Rule.
+        if (hasJumperAbility) return false; 
+        
+        // Altrimenti (solo striscianti intorno), prosegui al gate check!
+    }
+    else if (type == BugType::Grasshopper || type == BugType::Beetle || type == BugType::Ladybug)
+    {
+        return false; // I saltatori puri non sono mai bloccati dalla Gate Rule
     }
 
+    // A questo punto rimangono solo: QueenBee, SoldierAnt, Spider, Pillbug 
+    // (e la Mosquito "strisciante"). Eseguiamo il gate check.
     Index pos = board.GetPosition(piece);
     for (int d = 0; d < 6; ++d)
         if (board.CanSlide(pos, static_cast<Direction>(d), SlideMode::Ground, pos))
             return false;
+
     return true;
 }
 
@@ -341,6 +368,52 @@ GNNGraph BoardEncoder::encode(const Board& board)
     }
 
     return out;
+}
+
+// =============================================================================
+// JSON serialization
+// =============================================================================
+
+std::string GNNGraphToJson(const GNNGraph& graph)
+{
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6);
+    ss << "{";
+
+    ss << "\"x\":[";
+    for (size_t i = 0; i < graph.x.size(); ++i)
+    {
+        if (i > 0) ss << ",";
+        ss << graph.x[i];
+    }
+    ss << "],";
+
+    ss << "\"edge_index\":[";
+    for (size_t i = 0; i < graph.edge_index.size(); ++i)
+    {
+        if (i > 0) ss << ",";
+        ss << graph.edge_index[i];
+    }
+    ss << "],";
+
+    ss << "\"edge_attr\":[";
+    for (size_t i = 0; i < graph.edge_attr.size(); ++i)
+    {
+        if (i > 0) ss << ",";
+        ss << graph.edge_attr[i];
+    }
+    ss << "],";
+
+    ss << "\"u\":[";
+    for (size_t i = 0; i < graph.u.size(); ++i)
+    {
+        if (i > 0) ss << ",";
+        ss << graph.u[i];
+    }
+    ss << "]";
+
+    ss << "}";
+    return ss.str();
 }
 
 } // namespace HiveGotThis
