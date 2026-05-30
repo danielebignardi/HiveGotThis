@@ -41,6 +41,7 @@ void Engine::Run()
 
         // Splitta: il primo token è il comando, il resto è il parametro
         std::vector<std::string> tokens = Split(line);
+        if (tokens.empty()) continue; // robustezza: nessun token -> evita accesso a tokens[0]
         const std::string& command = tokens[0];
 
         // Ricostruisce i parametri unendo i token rimanenti con spazio

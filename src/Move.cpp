@@ -1,3 +1,4 @@
+#include <cctype>
 #include <cstring>
 #include <ostream>
 #include <sstream>
@@ -8,6 +9,19 @@
 
 namespace HiveGotThis
 {
+
+// Canonicalizza il case di un token-pezzo UHP: colore (1° char) minuscolo,
+// lettera del bug (2° char) maiuscola, eventuale numero invariato.
+// Es. "wq" -> "wQ", "ws1" -> "wS1", "WB1" -> "wB1".
+static std::string CanonicalizePieceToken(const std::string& token)
+{
+    std::string r = token;
+    if (!r.empty())
+        r[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(r[0])));
+    if (r.size() > 1)
+        r[1] = static_cast<char>(std::toupper(static_cast<unsigned char>(r[1])));
+    return r;
+}
 
 std::ostream& operator<<(std::ostream& os, const Move& move)
 {
@@ -120,11 +134,19 @@ bool TryNormalizeMoveString(const std::string &moveString, bool &isPass, PieceNa
         }
     }
 
-    while (i < moveString.length() && moveString[i] != ' ' && 
+    // Salta eventuali spazi tra il separatore e il pezzo di riferimento
+    // (es. "wB1 - wQ", "wq /  ws1"): l'UHP canonico non li ha, ma il
+    // normalizzatore deve accettare input "sporco".
+    while (i < moveString.length() && moveString[i] == ' ') i++;
+
+    while (i < moveString.length() && moveString[i] != ' ' &&
            moveString[i] != '-' && moveString[i] != '/' && moveString[i] != '\\') {
         piece2 += moveString[i];
         i++;
     }
+
+    // Salta eventuali spazi prima di un separatore in coda (es. "wQ wS1 -")
+    while (i < moveString.length() && moveString[i] == ' ') i++;
 
     if (i < moveString.length()) {
         char c = moveString[i];
@@ -133,12 +155,12 @@ bool TryNormalizeMoveString(const std::string &moveString, bool &isPass, PieceNa
         }
     }
 
-    startPiece = GetPieceNameValue(piece1.c_str());
+    startPiece = GetPieceNameValue(CanonicalizePieceToken(piece1).c_str());
     if (startPiece == PieceName::INVALID) return false;
 
     if (!piece2.empty()) {
-        endPiece = GetPieceNameValue(piece2.c_str());
-        if (endPiece == PieceName::INVALID) return false; 
+        endPiece = GetPieceNameValue(CanonicalizePieceToken(piece2).c_str());
+        if (endPiece == PieceName::INVALID) return false;
     }
 
     return true;

@@ -112,8 +112,8 @@ void TestNewGame()
         std::string out = RunEngine("newgame\n");
         CHECK("newgame: contiene 'Base'",
               out.find("Base") != std::string::npos);
-        CHECK("newgame: contiene 'InProgress'",
-              out.find("InProgress") != std::string::npos);
+        CHECK("newgame: contiene 'NotStarted'",
+              out.find("NotStarted") != std::string::npos);
         CHECK("newgame: contiene 'White[1]'",
               out.find("White[1]") != std::string::npos);
         CHECK("newgame: nessun errore",
@@ -123,8 +123,8 @@ void TestNewGame()
     // --- newgame Base ---
     {
         std::string out = RunEngine("newgame Base\n");
-        CHECK("newgame Base: contiene 'Base;InProgress;White[1]'",
-              out.find("Base;InProgress;White[1]") != std::string::npos);
+        CHECK("newgame Base: contiene 'Base;NotStarted;White[1]'",
+              out.find("Base;NotStarted;White[1]") != std::string::npos);
     }
 
     // --- newgame Base+MLP ---
@@ -173,8 +173,8 @@ void TestValidMoves()
     {
         std::string out = RunEngine("newgame\nvalidmoves\n");
 
-        CHECK("validmoves turno 1: contiene 'wQ'",
-              out.find("wQ") != std::string::npos);
+        CHECK("validmoves turno 1: NON contiene 'wQ' (la regina non puo' aprire)",
+              out.find("wQ") == std::string::npos);
         CHECK("validmoves turno 1: contiene 'wS1'",
               out.find("wS1") != std::string::npos);
         CHECK("validmoves turno 1: contiene 'wG1'",
@@ -187,7 +187,7 @@ void TestValidMoves()
 
     // --- validmoves al secondo turno (dopo prima mossa bianca) ---
     {
-        std::string out = RunEngine("newgame\nplay wQ\nvalidmoves\n");
+        std::string out = RunEngine("newgame\nplay wS1\nvalidmoves\n");
 
         CHECK("validmoves turno 2: contiene pezzi neri",
               out.find("bQ") != std::string::npos || out.find("bS1") != std::string::npos);
@@ -219,14 +219,14 @@ void TestPlay()
 
     // --- prima mossa valida ---
     {
-        std::string out = RunEngine("newgame\nplay wQ\n");
-        CHECK("play wQ: contiene 'InProgress'",
+        std::string out = RunEngine("newgame\nplay wS1\n");
+        CHECK("play wS1: contiene 'InProgress'",
               out.find("InProgress") != std::string::npos);
-        CHECK("play wQ: turno passa al nero 'Black[1]'",
+        CHECK("play wS1: turno passa al nero 'Black[1]'",
               out.find("Black[1]") != std::string::npos);
-        CHECK("play wQ: storico contiene 'wQ'",
-              out.find("wQ") != std::string::npos);
-        CHECK("play wQ: nessun errore",
+        CHECK("play wS1: storico contiene 'wS1'",
+              out.find("wS1") != std::string::npos);
+        CHECK("play wS1: nessun errore",
               out.find("err ") == std::string::npos);
     }
 
@@ -239,12 +239,12 @@ void TestPlay()
 
     // --- due mosse consecutive ---
     {
-        std::string out = RunEngine("newgame\nplay wQ\nplay bQ wQ-\n");
+        std::string out = RunEngine("newgame\nplay wS1\nplay bG1 -wS1\n");
         CHECK("due mosse: contiene 'White[2]'",
               out.find("White[2]") != std::string::npos);
         CHECK("due mosse: storico contiene entrambe le mosse",
-              out.find("wQ") != std::string::npos &&
-              out.find("bQ") != std::string::npos);
+              out.find("wS1") != std::string::npos &&
+              out.find("bG1") != std::string::npos);
         CHECK("due mosse: nessun errore",
               out.find("err ") == std::string::npos);
     }
@@ -260,10 +260,10 @@ void TestPlay()
     {
         std::string out = RunEngine(
             "newgame\n"
-            "play wQ\n"
-            "play bQ wQ-\n"
-            "play wS1 -wQ\n"
-            "play bS1 bQ-\n"
+            "play wS1\n"
+            "play bG1 -wS1\n"
+            "play wA1 wS1-\n"
+            "play bA1 -bG1\n"
         );
         CHECK("4 mosse: turno White[3]",
               out.find("White[3]") != std::string::npos);
@@ -375,7 +375,7 @@ void TestUndo()
 
     // --- undo dopo 1 mossa ---
     {
-        std::string out = RunEngine("newgame\nplay wQ\nundo\n");
+        std::string out = RunEngine("newgame\nplay wS1\nundo\n");
         CHECK("undo dopo 1 mossa: torna a 'White[1]'",
               CountOccurrences(out, "White[1]") >= 2); // newgame + dopo undo
         CHECK("undo dopo 1 mossa: nessun errore",
@@ -386,8 +386,8 @@ void TestUndo()
     {
         std::string out = RunEngine(
             "newgame\n"
-            "play wQ\n"
-            "play bQ wQ-\n"
+            "play wS1\n"
+            "play bG1 -wS1\n"
             "undo 2\n"
         );
         CHECK("undo 2: torna a 'White[1]'",
@@ -400,8 +400,8 @@ void TestUndo()
     {
         std::string out = RunEngine(
             "newgame\n"
-            "play wQ\n"
-            "play bQ wQ-\n"
+            "play wS1\n"
+            "play bG1 -wS1\n"
             "undo 1\n"
         );
         CHECK("undo 1 dopo 2 mosse: torna a 'Black[1]'",
@@ -412,14 +412,14 @@ void TestUndo()
 
     // --- undo troppo grande ---
     {
-        std::string out = RunEngine("newgame\nplay wQ\nundo 99\n");
+        std::string out = RunEngine("newgame\nplay wS1\nundo 99\n");
         CHECK("undo 99 con 1 mossa: contiene 'err '",
               out.find("err ") != std::string::npos);
     }
 
     // --- undo con argomento non numerico ---
     {
-        std::string out = RunEngine("newgame\nplay wQ\nundo abc\n");
+        std::string out = RunEngine("newgame\nplay wS1\nundo abc\n");
         CHECK("undo con argomento non numerico: contiene 'err '",
               out.find("err ") != std::string::npos);
     }
@@ -428,9 +428,9 @@ void TestUndo()
     {
         std::string out = RunEngine(
             "newgame\n"
-            "play wQ\n"
-            "undo\n"
             "play wS1\n"
+            "undo\n"
+            "play wB1\n"
         );
         CHECK("undo e rigioca: contiene 'Black[1]'",
               out.find("Black[1]") != std::string::npos);
@@ -531,10 +531,10 @@ void TestFullSession()
 
     std::string out = RunEngine(
         "newgame\n"
-        "play wQ\n"
-        "play bQ wQ-\n"
-        "play wS1 -wQ\n"
-        "play bS1 bQ-\n"
+        "play wS1\n"
+        "play bG1 -wS1\n"
+        "play wA1 wS1-\n"
+        "play bA1 -bG1\n"
         "validmoves\n"
         "bestmove depth 1\n"
         "undo 2\n"
@@ -608,7 +608,7 @@ void TestRobustness()
     {
         std::string out = RunEngine("\n\n\nnewgame\n\n");
         CHECK("righe vuote: non crasha",
-              out.find("InProgress") != std::string::npos);
+              out.find("NotStarted") != std::string::npos);
     }
 
     // Play senza argomento
@@ -622,12 +622,12 @@ void TestRobustness()
     {
         std::string out = RunEngine(
             "newgame\n"
-            "play wQ\n"
+            "play wS1\n"
             "newgame\n"
             "validmoves\n"
         );
-        CHECK("doppio newgame: validmoves dopo reset contiene 'wQ'",
-              out.find("wQ") != std::string::npos);
+        CHECK("doppio newgame: validmoves dopo reset contiene 'wS1'",
+              out.find("wS1") != std::string::npos);
         CHECK("doppio newgame: nessun errore",
               out.find("err ") == std::string::npos);
     }
