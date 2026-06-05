@@ -64,14 +64,13 @@ void TranspositionTable::Store(uint64_t hash, double value, int16_t depth, bool 
 // MCTSNode
 // =============================================================================
 
-MCTSNode::MCTSNode(Move move, MCTSNode* parent, bool isMaxNode, double heuristicScore)
+MCTSNode::MCTSNode(Move move, MCTSNode* parent, double heuristicScore)
     : move(move)
     , parent(parent)
     , visitCount(0)
     , totalValue(0.0)
     , isExpanded(false)
     , isTerminal(false)
-    , isMaxNode(isMaxNode)
     , provenResult(0)
     , heuristicScore(heuristicScore)
 {
@@ -83,39 +82,28 @@ MCTSNode::~MCTSNode()
         delete child;
 }
 
-double MCTSNode::UCB1(double explorationC, double logParentVisits, bool maximizing) const
+double MCTSNode::UCB1(double explorationC, double logParentVisits) const
 {
-    // Nodo con risultato provato: restituisce +/- infinito a seconda di chi sceglie.
-    // MAX (rootColor) preferisce provenResult=1, MIN (avversario) preferisce provenResult=-1.
+    // Negamax: il valore di questo figlio e' dal punto di vista del SUO giocatore di turno
+    // (l'avversario di chi sta scegliendo). Il genitore preferisce il figlio il cui
+    // giocatore di turno PERDE (provenResult == -1).
     if (provenResult != 0)
     {
-        if (maximizing)
-        {
-            return (provenResult == 1) ? std::numeric_limits<double>::max() : -std::numeric_limits<double>::max();
-        }
-        else
-        {
-            return (provenResult == -1) ? std::numeric_limits<double>::max() : -std::numeric_limits<double>::max();
-        }
+        return (provenResult == -1) ? std::numeric_limits<double>::max()
+                                    : -std::numeric_limits<double>::max();
     }
 
-    // Win rate dal punto di vista di rootColor
-    double winRate = totalValue / static_cast<double>(visitCount);
-
-    // Nodo MAX: massimizza winRate. Nodo MIN: massimizza (1 - winRate).
-    double exploitation = maximizing ? winRate : (1.0 - winRate);
+    // Valore del figlio in [-1,1] dal punto di vista del suo giocatore di turno.
+    // L'utilita' per il genitore e' (1 - childValue) / 2, rimappata in [0,1] cosi'
+    // che EXPLORATION_C e PROGRESSIVE_BIAS_WEIGHT mantengano la scala originale.
+    double childValue = totalValue / static_cast<double>(visitCount);
+    double exploitation = (1.0 - childValue) / 2.0;
 
     double exploration = explorationC * std::sqrt(logParentVisits / static_cast<double>(visitCount));
-    
+
     double bias = PROGRESSIVE_BIAS_WEIGHT * heuristicScore / static_cast<double>(visitCount + 1);
 
     return exploitation + exploration + bias;
-}
-
-double MCTSNode::WinRate() const
-{
-    if (visitCount == 0) return 0.5;
-    return totalValue / static_cast<double>(visitCount);
 }
 
 
@@ -193,64 +181,44 @@ void MCTS::OrderMoves(std::vector<Move>& moves, const Board& board, Color perspe
 // =============================================================================
 
 // Prova a determinare se il risultato di `node` e' certo, risalendo verso la radice.
-// Logica minimax: MAX vince se almeno un figlio e' vittoria; perde se tutti sono sconfitta.
-//                 MIN vince (per se') se almeno un figlio e' sconfitta di rootColor; perde se tutti sono vittoria.
+// Negamax: provenResult e' dal punto di vista del giocatore di turno in `node`; i figli
+// portano il provenResult dal punto di vista dell'avversario. Quindi:
+//   - vinco se ALMENO un figlio e' una sconfitta per l'avversario (provenResult == -1);
+//   - perdo se TUTTI i figli sono vittorie per l'avversario (provenResult == +1).
 void MCTS::TrySolve(MCTSNode* node)
 {
-    if (!node->isExpanded || node->children.empty())
+    // Il lucchetto globale isExpanded è stato rimosso.
+    // Ci fermiamo solo se non abbiamo ancora generato alcun figlio da valutare.
+    if (node->children.empty())
         return;
 
     bool allChildrenProven = true;
 
-    if (node->isMaxNode)
+    for (MCTSNode* child : node->children)
     {
-        for (MCTSNode* child : node->children)
+        if (child->provenResult == -1)
         {
-            if (child->provenResult == 0)
-            {
-                allChildrenProven = false;
-            }
-            else if (child->provenResult == 1)
-            {
-                // Basta un figlio vincente: rootColor sceglie quello
-                node->provenResult = 1;
-                if (node->parent != nullptr)
-                    TrySolve(node->parent);
-                return;
-            }
-        }
-        // Tutti figli provati e nessuna vittoria: tutte le mosse perdono
-        if (allChildrenProven)
-        {
-            node->provenResult = -1;
-            if (node->parent != nullptr)
-                TrySolve(node->parent);
-        }
-    }
-    else
-    {
-        for (MCTSNode* child : node->children)
-        {
-            if (child->provenResult == 0)
-            {
-                allChildrenProven = false;
-            }
-            else if (child->provenResult == -1)
-            {
-                // Basta un figlio perdente: l'avversario sceglie quello
-                node->provenResult = -1;
-                if (node->parent != nullptr)
-                    TrySolve(node->parent);
-                return;
-            }
-        }
-        // Tutti figli provati e nessuna sconfitta: rootColor vince comunque
-        if (allChildrenProven)
-        {
+            // EARLY WIN: esiste una mossa in cui l'avversario perde.
+            // Propaghiamo subito la vittoria senza aspettare l'espansione totale.
             node->provenResult = 1;
             if (node->parent != nullptr)
                 TrySolve(node->parent);
+            return;
         }
+        else if (child->provenResult == 0)
+        {
+            allChildrenProven = false;
+        }
+    }
+
+    // TRAPPOLA INEVITABILE (Sconfitta):
+    // Per arrenderci, dobbiamo accertarci che TUTTI i figli siano stati provati (allChildrenProven)
+    // come vittorie per l'avversario E che non ci siano più mosse da esplorare (node->isExpanded).
+    if (allChildrenProven && node->isExpanded)
+    {
+        node->provenResult = -1;
+        if (node->parent != nullptr)
+            TrySolve(node->parent);
     }
 }
 
@@ -260,8 +228,9 @@ void MCTS::TrySolve(MCTSNode* node)
 // =============================================================================
 
 // Esegue una singola iterazione MCTS: selezione -> espansione -> valutazione -> backpropagation.
-// Tutti i valori sono dal punto di vista di rootColor (1.0 = vittoria, 0.0 = sconfitta).
-void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor, TranspositionTable& tt)
+// Convenzione negamax: ogni valore e' in [-1,1] dal punto di vista del giocatore di turno nel
+// nodo (+1 = chi muove vince, -1 = perde, 0 = patta); il segno si inverte ad ogni livello in backup.
+void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTable& tt)
 {
     // === SELEZIONE ===
     // Scende nell'albero seguendo UCB1 fino a un nodo da espandere, terminale, o provato.
@@ -278,7 +247,7 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor,
 
         for (MCTSNode* child : node->children)
         {
-            double ucb = child->UCB1(EXPLORATION_C, logParent, node->isMaxNode);
+            double ucb = child->UCB1(EXPLORATION_C, logParent);
             if (ucb > bestUCB)
             {
                 bestUCB = ucb;
@@ -291,15 +260,17 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor,
         depth++;
     }
 
-    // Nodo gia' provato: backpropaga direttamente senza espandere
+    // Nodo gia' provato: backpropaga direttamente senza espandere.
+    // value e' dal punto di vista del giocatore di turno nel nodo; negamax inverte il segno ad ogni livello.
     if (node->provenResult != 0)
     {
-        double value = (node->provenResult == 1) ? 1.0 : 0.0;
+        double value = (node->provenResult == 1) ? 1.0 : -1.0;
         MCTSNode* current = node;
         while (current != nullptr)
         {
             current->visitCount++;
             current->totalValue += value;
+            value = -value;
             current = current->parent;
         }
         return;
@@ -317,10 +288,11 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor,
                 node->isTerminal = true;
                 node->isExpanded = true;
 
+                // provenResult dal punto di vista del giocatore di turno in questo nodo (board.currentColor)
                 if (state == BoardState::WhiteWins)
-                    node->provenResult = (rootColor == Color::White) ? 1 : -1;
+                    node->provenResult = (board.currentColor == Color::White) ? 1 : -1;
                 else if (state == BoardState::BlackWins)
-                    node->provenResult = (rootColor == Color::White) ? -1 : 1;
+                    node->provenResult = (board.currentColor == Color::White) ? -1 : 1;
             }
             else
             {
@@ -338,13 +310,11 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor,
             if (node->unexpandedMoves.empty())
                 node->isExpanded = true;
 
+            // heuristicScore dal punto di vista di chi muove ora (board.currentColor),
+            // ovvero il genitore: si allinea con l'utilita' del genitore nel termine di bias di UCB1.
             double hScore = EvaluateMove(board, move, board.currentColor);
 
-            // Il figlio e' MAX se dopo la mossa tocca a rootColor.
-            // Ora muove board.currentColor, dopo ApplyMove tocchera' all'altro.
-            bool childIsMax = (board.currentColor != rootColor);
-
-            MCTSNode* child = new MCTSNode(move, node, childIsMax, hScore);
+            MCTSNode* child = new MCTSNode(move, node, hScore);
             node->children.push_back(child);
 
             board.ApplyMove(move);
@@ -358,21 +328,23 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor,
                 node->isTerminal = true;
                 node->isExpanded = true;
 
+                // provenResult dal punto di vista del giocatore di turno nel figlio (board.currentColor dopo ApplyMove)
                 if (childState == BoardState::WhiteWins)
-                    node->provenResult = (rootColor == Color::White) ? 1 : -1;
+                    node->provenResult = (board.currentColor == Color::White) ? 1 : -1;
                 else if (childState == BoardState::BlackWins)
-                    node->provenResult = (rootColor == Color::White) ? -1 : 1;
+                    node->provenResult = (board.currentColor == Color::White) ? -1 : 1;
             }
         }
     }
 
     // === VALUTAZIONE ===
     // Determina il valore della foglia: risultato provato, cache TT, o euristica.
+    // value e' in [-1,1] dal punto di vista del giocatore di turno nella foglia (board.currentColor).
     double value;
 
     if (node->provenResult != 0)
     {
-        value = (node->provenResult == 1) ? 1.0 : 0.0;
+        value = (node->provenResult == 1) ? 1.0 : -1.0;
     }
     else
     {
@@ -381,22 +353,26 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor,
 
         if (tt.Probe(hash, ttEntry))
         {
+            // L'hash Zobrist include il turno, quindi il valore side-to-move memorizzato e' coerente.
             value = ttEntry.value;
         }
         else
         {
-            value = EvaluateBoard(board, rootColor);
+            // L'euristica restituisce [0,1] dal punto di vista di chi muove: rimappa in [-1,1].
+            // Quando subentrera' la value network, restituira' gia' [-1,1] side-to-move e il 2v-1 sparisce.
+            value = 2.0 * EvaluateBoard(board, board.currentColor) - 1.0;
             tt.Store(hash, value, static_cast<int16_t>(depth), node->isTerminal);
         }
     }
 
     // === BACKPROPAGATION ===
-    // Risale fino alla radice, aggiornando visite e valore cumulativo di ogni nodo.
+    // Risale fino alla radice (negamax): visite +1, valore += value, poi inverte il segno ad ogni livello.
     MCTSNode* current = node;
     while (current != nullptr)
     {
         current->visitCount++;
         current->totalValue += value;
+        value = -value;
         current = current->parent;
     }
 
@@ -412,15 +388,17 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor,
 // Priorita':   1) vittoria provata
 //              2) mossa piu' visitata (escluse sconfitte provate),
 //              3) se tutto e' perso, mossa piu' visitata (ritarda la sconfitta).
+// NB: i figli della radice hanno provenResult dal punto di vista dell'avversario (chi muove dopo).
+// Una vittoria per noi e' un figlio dove l'avversario perde (== -1); una sconfitta nostra e' (== +1).
 Move MCTS::SelectBestMove(MCTSNode* root)
 {
     MCTSNode* bestChild = nullptr;
     int bestVisits = -1;
 
-    // 1) Cerca una vittoria provata
+    // 1) Cerca una vittoria provata (figlio in cui l'avversario perde)
     for (MCTSNode* child : root->children)
     {
-        if (child->provenResult == 1)
+        if (child->provenResult == -1)
         {
             if (child->visitCount > bestVisits)
             {
@@ -432,12 +410,12 @@ Move MCTS::SelectBestMove(MCTSNode* root)
     if (bestChild)
         return bestChild->move;
 
-    // 2) Mossa piu' visitata, escludendo le sconfitte provate
+    // 2) Mossa piu' visitata, escludendo le sconfitte provate (figli in cui l'avversario vince)
     bestVisits = -1;
     bestChild = nullptr;
     for (MCTSNode* child : root->children)
     {
-        if (child->provenResult == -1)
+        if (child->provenResult == 1)
             continue;
 
         if (child->visitCount > bestVisits)
@@ -490,7 +468,7 @@ Move MCTS::Search(const Board& rootBoard, int timeLimitMs)
             return m;
     }
 
-    MCTSNode root(PassMove, nullptr, /*isMaxNode=*/true);
+    MCTSNode root(PassMove, nullptr);
     root.visitCount = 1;
     TranspositionTable tt(18);
 
@@ -500,7 +478,7 @@ Move MCTS::Search(const Board& rootBoard, int timeLimitMs)
     int iterations = 0;
     while (true)
     {
-        RunIteration(&root, rootBoard, rootColor, tt);
+        RunIteration(&root, rootBoard, tt);
         iterations++;
 
         if ((iterations & (TIME_CHECK_INTERVAL - 1)) == 0)
@@ -534,13 +512,13 @@ Move MCTS::SearchIterations(const Board& rootBoard, int maxIterations)
             return m;
     }
 
-    MCTSNode root(PassMove, nullptr, /*isMaxNode=*/true);
+    MCTSNode root(PassMove, nullptr);
     root.visitCount = 1;
     TranspositionTable tt(18);
 
     for (int i = 0; i < maxIterations; i++)
     {
-        RunIteration(&root, rootBoard, rootColor, tt);
+        RunIteration(&root, rootBoard, tt);
         if (root.provenResult != 0)
             break;
     }

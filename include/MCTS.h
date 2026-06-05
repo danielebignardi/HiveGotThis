@@ -17,7 +17,7 @@ namespace HiveGotThis
 struct TTEntry
 {
     uint64_t hash;      // Hash Zobrist della posizione
-    double value;       // Valutazione dal punto di vista di rootColor
+    double value;       // Valutazione [-1,1] dal punto di vista del giocatore di turno (side-to-move)
     int16_t depth;      // Profondita' nell'albero a cui e' stata calcolata
     bool isExact;       // true se il valore e' terminale (non stimato)
 };
@@ -56,16 +56,13 @@ struct MCTSNode
     std::vector<MCTSNode*> children;
 
     int visitCount;
-    double totalValue;                  // Somma delle valutazioni backpropagate (sempre dal punto di vista di rootColor)
+    double totalValue;                  // Somma [-1,1] delle valutazioni negamax dal punto di vista del giocatore di turno in questo nodo
 
     bool isExpanded;                    // true quando tutte le mosse figlie sono state generate
     bool isTerminal;
 
-    // true = rootColor muove (nodo MAX); false = avversario muove (nodo MIN)
-    bool isMaxNode;
-
-    // Risultato provato dal solver (punto di vista di rootColor):
-    //   0 = non provato, 1 = vittoria, -1 = sconfitta
+    // Risultato provato dal solver, dal punto di vista del giocatore di turno in questo nodo:
+    //   0 = non provato, 1 = il giocatore di turno vince, -1 = il giocatore di turno perde
     int8_t provenResult;
 
     // Valutazione euristica della mossa [0,1], usata dal progressive bias
@@ -74,13 +71,11 @@ struct MCTSNode
     // Mosse ancora da espandere (ordinate: peggiori in testa, migliori in coda)
     std::vector<Move> unexpandedMoves;
 
-    MCTSNode(Move move, MCTSNode* parent, bool isMaxNode, double heuristicScore = 0.5);
+    MCTSNode(Move move, MCTSNode* parent, double heuristicScore = 0.5);
     ~MCTSNode();
 
-    // Calcola il punteggio UCB1 di questo nodo.
-    // `maximizing` indica se il genitore e' un nodo MAX (rootColor sceglie) o MIN (avversario sceglie).
-    double UCB1(double explorationC, double logParentVisits, bool maximizing) const;
-    double WinRate() const;
+    // Calcola il punteggio UCB1 di questo nodo dal punto di vista del genitore (negamax).
+    double UCB1(double explorationC, double logParentVisits) const;
 };
 
 
@@ -100,7 +95,7 @@ private:
     static constexpr int TIME_CHECK_INTERVAL = 128;     // Controlla il tempo ogni N iterazioni
 
     // Algoritmo
-    static void RunIteration(MCTSNode* root, const Board& rootBoard, Color rootColor, TranspositionTable& tt);
+    static void RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTable& tt);
     static Move SelectBestMove(MCTSNode* root);
     static void OrderMoves(std::vector<Move>& moves, const Board& board, Color perspective);
     static bool IsInstantWin(const Board& board, const Move& move, Color perspective);
