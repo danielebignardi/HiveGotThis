@@ -1,0 +1,216 @@
+"""
+Export HiveValueGNN to TorchScript.
+
+Uso tipico:
+
+    python scripts/export_hive_value_gnn.py --weights weights.pt --output hive_value_gnn.pt
+
+Per testare subito l'integrazione C++ senza training:
+
+    python scripts/export_hive_value_gnn.py --output hive_value_gnn.pt
+
+Lo script produce un file TorchScript autocontenuto che il C++ carica con
+libtorch tramite TorchScriptValueEvaluator.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+from torch.nn import Dropout, LayerNorm, Linear, ReLU, Sequential, Tanh
+from torch_geometric.nn import GATv2Conv, global_max_pool, global_mean_pool
+
+
+NODE_IN_DIM = 18
+EDGE_IN_DIM = 9
+GLOBAL_DIM = 21
+
+
+class HiveValueGNN(torch.nn.Module):
+    """Value network descritta in Hive_GNN_Spec.md.
+
+    Input:
+        x:          [N, 18] float32
+        edge_index: [2, E]  int64
+        edge_attr:  [E, 9]  float32
+        u:          [B, 21] float32
+        batch:      [N]     int64
+
+    Output:
+        value:      [B, 1]  float32 in [-1, 1]
+    """
+
+    def __init__(
+        self,
+        node_in_dim: int = NODE_IN_DIM,
+        edge_in_dim: int = EDGE_IN_DIM,
+        u_dim: int = GLOBAL_DIM,
+        hidden_dim: int = 64,
+        heads: int = 4,
+        dropout_p: float = 0.2,
+    ) -> None:
+        super().__init__()
+
+        self.conv1 = GATv2Conv(
+            node_in_dim,
+            hidden_dim,
+            edge_dim=edge_in_dim,
+            heads=heads,
+            concat=False,
+            add_self_loops=False,
+        )
+        self.norm1 = LayerNorm(hidden_dim)
+
+        self.conv2 = GATv2Conv(
+            hidden_dim,
+            hidden_dim,
+            edge_dim=edge_in_dim,
+            heads=heads,
+            concat=False,
+            add_self_loops=False,
+        )
+        self.norm2 = LayerNorm(hidden_dim)
+
+        self.conv3 = GATv2Conv(
+            hidden_dim,
+            hidden_dim,
+            edge_dim=edge_in_dim,
+            heads=heads,
+            concat=False,
+            add_self_loops=False,
+        )
+        self.norm3 = LayerNorm(hidden_dim)
+
+        self.value_head = Sequential(
+            Linear(2 * hidden_dim + u_dim, 32),
+            LayerNorm(32),
+            ReLU(),
+            Dropout(p=dropout_p),
+            Linear(32, 1),
+            Tanh(),
+        )
+
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+        edge_attr: Tensor,
+        u: Tensor,
+        batch: Tensor,
+    ) -> Tensor:
+        x = F.elu(self.norm1(self.conv1(x, edge_index, edge_attr)))
+        x = F.elu(self.norm2(self.conv2(x, edge_index, edge_attr)))
+        x = F.elu(self.norm3(self.conv3(x, edge_index, edge_attr)))
+
+        pooled = torch.cat(
+            [
+                global_mean_pool(x, batch),
+                global_max_pool(x, batch),
+                u,
+            ],
+            dim=1,
+        )
+        return self.value_head(pooled)
+
+
+def make_dummy_batch(device: torch.device) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Crea un piccolo batch valido per testare script/export.
+
+    Il batch contiene due grafi. Gli edge_index rispettano la convenzione del C++:
+    prima tutte le sorgenti, poi tutte le destinazioni, forma logica [2, E].
+    """
+
+    x = torch.zeros((5, NODE_IN_DIM), dtype=torch.float32, device=device)
+    x[:, 0] = 1.0
+    x[:, 8] = torch.tensor([1.0, -1.0, 1.0, 1.0, -1.0], device=device)
+
+    edge_index = torch.tensor(
+        [
+            [0, 1, 1, 2, 3, 4, 0, 1, 2, 3, 4],
+            [1, 0, 2, 1, 4, 3, 0, 1, 2, 3, 4],
+        ],
+        dtype=torch.int64,
+        device=device,
+    )
+
+    edge_attr = torch.zeros((edge_index.size(1), EDGE_IN_DIM), dtype=torch.float32, device=device)
+    edge_attr[0, 0] = 1.0
+    edge_attr[1, 3] = 1.0
+    edge_attr[2, 1] = 1.0
+    edge_attr[3, 4] = 1.0
+    edge_attr[4, 0] = 1.0
+    edge_attr[5, 3] = 1.0
+    edge_attr[6:, 8] = 1.0
+
+    u = torch.zeros((2, GLOBAL_DIM), dtype=torch.float32, device=device)
+    batch = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int64, device=device)
+
+    return x, edge_index, edge_attr, u, batch
+
+
+def load_weights(model: torch.nn.Module, weights_path: Path, device: torch.device) -> None:
+    checkpoint = torch.load(weights_path, map_location=device)
+
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        checkpoint = checkpoint["model_state_dict"]
+
+    model.load_state_dict(checkpoint)
+
+
+def export_model(args: argparse.Namespace) -> None:
+    device = torch.device(args.device)
+
+    model = HiveValueGNN(
+        hidden_dim=args.hidden_dim,
+        heads=args.heads,
+        dropout_p=args.dropout,
+    ).to(device)
+
+    if args.weights is not None:
+        load_weights(model, Path(args.weights), device)
+
+    # eval() e' obbligatorio: Dropout deve essere disattivato sia per export
+    # sia per inferenza C++.
+    model.eval()
+
+    dummy_inputs = make_dummy_batch(device)
+
+    with torch.no_grad():
+        eager_out = model(*dummy_inputs)
+
+    scripted = torch.jit.script(model)
+    scripted.eval()
+
+    with torch.no_grad():
+        scripted_out = scripted(*dummy_inputs)
+
+    if not torch.allclose(eager_out, scripted_out, atol=args.atol):
+        max_diff = (eager_out - scripted_out).abs().max().item()
+        raise RuntimeError(f"Export fidelity check failed: max diff = {max_diff:.8f}")
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    scripted.save(str(output_path))
+
+    print(f"Saved TorchScript model to: {output_path}")
+    print(f"Fidelity check passed with atol={args.atol}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Export HiveValueGNN to hive_value_gnn.pt")
+    parser.add_argument("--weights", type=str, default=None, help="Optional PyTorch state_dict/checkpoint path.")
+    parser.add_argument("--output", type=str, default="hive_value_gnn.pt", help="TorchScript output path.")
+    parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--heads", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--atol", type=float, default=1e-5)
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    export_model(parse_args())
