@@ -11,7 +11,14 @@
 #include <cstring>
 
 namespace HiveGotThis
-{  
+{
+
+// Stato salvato prima di ApplyMoveSavingUndo, necessario a UndoMove per ripristinare la board.
+struct MoveUndo
+{
+    BoardState prevBoardState;
+    bool       prevCannotBeMoved[NumPieceNames];
+};
 
 class Board
 {
@@ -80,6 +87,12 @@ class Board
 
         // Da chiamare dopo ogni mossa/piazzamento: aggiorna cannotBeMoved, currentTurn, currentColor.
         void ApplyMove(const Move& move);
+
+        // Come ApplyMove ma salva in undo le informazioni necessarie a invertirla.
+        void ApplyMoveSavingUndo(const Move& move, MoveUndo& undo);
+
+        // Inverte una mossa applicata con ApplyMoveSavingUndo, ripristinando lo stato precedente.
+        void UndoMove(const Move& move, const MoveUndo& undo);
 
         // Imposta boardState = InProgress (da chiamare all'avvio di una partita)
         void StartGame();

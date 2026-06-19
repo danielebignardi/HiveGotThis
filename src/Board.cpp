@@ -1,12 +1,40 @@
 #include "Board.h"
-#include <iterator>
 #include <algorithm>
-#include <unordered_set>
+#include <iterator>
 #include <random>
-#include <iostream>
 
 namespace HiveGotThis
-{  
+{
+
+// Una Move è univocamente identificata da (Piece, Destination): la Source dipende
+// dallo stato del pezzo (NullIndex se in mano, posizione attuale altrimenti) e quindi
+// non aggiunge informazione. Usiamo un bitmap statico [NumPieceNames][BoardSize]
+// (229 KB, azzerato una volta dal loader) e lo ripristiniamo solo per le celle
+// effettivamente marcate, evitando il costo di un unordered_set per ogni chiamata.
+static void DedupMoves(std::vector<Move>& moves)
+{
+    static bool seen[NumPieceNames][BoardSize];
+
+    size_t write = 0;
+    for (const Move& m : moves)
+    {
+        // PassMove ha Destination invalida: arriva solo quando moves era vuoto,
+        // quindi non collide con nulla. La lasciamo passare senza marcarla.
+        if (!IsValidIndex(m.Destination)) { moves[write++] = m; continue; }
+
+        bool& bit = seen[m.Piece][m.Destination];
+        if (bit) continue;
+        bit = true;
+        moves[write++] = m;
+    }
+    // Reset mirato: tocchiamo solo le celle che abbiamo davvero marcato.
+    for (size_t i = 0; i < write; ++i)
+    {
+        const Move& m = moves[i];
+        if (IsValidIndex(m.Destination)) seen[m.Piece][m.Destination] = false;
+    }
+    moves.resize(write);
+}
 
 // - - - - - - - - - - COSTRUTTORE- - - - - - - - - -
 
@@ -120,6 +148,42 @@ void Board::ApplyMove(const Move& move)
     UpdateBoardState();
 }
 
+void Board::ApplyMoveSavingUndo(const Move& move, MoveUndo& undo)
+{
+    undo.prevBoardState = boardState;
+    memcpy(undo.prevCannotBeMoved, cannotBeMoved, sizeof(cannotBeMoved));
+    ApplyMove(move);
+}
+
+void Board::UndoMove(const Move& move, const MoveUndo& undo)
+{
+    // Inverte ApplyTurnEffects: hashHistory, hash di turno, turno, colore, boardState.
+    hashHistory.pop_back();
+    ToggleTurnHash();
+    currentTurn--;
+    ToggleColor();
+
+    // Inverte lo spostamento del pezzo. Per ipotesi XOR è auto-inversa, quindi richiamare
+    // PopAt/PushAt sulle stesse celle/altezze ripristina anche currentHash sul piano dei pezzi.
+    if (move != PassMove)
+    {
+        if (move.Source == NullIndex)
+        {
+            // Era un piazzamento: rimuovi il pezzo dalla destinazione, torna in mano.
+            PopAt(move.Destination);
+        }
+        else
+        {
+            // Era un movimento (o un lancio del Pillbug): riporta il pezzo all'origine.
+            MovePiece(move.Piece, move.Source);
+        }
+    }
+
+    // Ripristina i vincoli e lo stato salvati prima dell'ApplyMove.
+    memcpy(cannotBeMoved, undo.prevCannotBeMoved, sizeof(cannotBeMoved));
+    boardState = undo.prevBoardState;
+}
+
 void Board::ApplyTurnEffects() {
     ToggleColor();
     currentTurn++;
@@ -173,20 +237,18 @@ void Board::InitializeZobristTable()
 
 bool Board::CanMoveWithoutBreakingHive(PieceName piece) const
 {
-    Index pos = piecesPositions[piece];
-    
-    // Il pezzo non è sulla board (è in mano) -> si può muovere
-    if (PieceInHand(piece)) return true; 
+    // In mano: nessun vincolo, si potrà piazzare.
+    if (PieceInHand(piece)) return true;
 
-    // Il pezzo è coperto -> non si può muovere
+    Index pos = piecesPositions[piece];
+
+    // Coperto da un altro pezzo (es. uno scarabeo sopra): pinnato.
     if (GetPieceAt(pos) != piece) return false;
 
-    // Se sotto al pezzo ce ne è un altro, si può spostare 
+    // Ha un pezzo sotto: rimuoverlo non rompe l'hive (qualcosa resta nella casella).
     if (below[piece] != PieceName::INVALID) return true;
 
-    // Unico pezzo in questa posizione (altezza 1)
-    // Bisogna simulare la rimozione e vedere se tutto resta connesso
-    // Si dice a IsOneHive di considerare pos come se fosse vuota
+    // Unico pezzo nella casella: simulazione con BFS treating pos come vuota.
     return IsOneHive(pos);
 }
 
@@ -540,47 +602,63 @@ void Board::GetLadybugMoves(PieceName piece, std::vector<Move>& moves) const
 
     Index pos = piecesPositions[piece];
 
-    // Passo 1: celle occupate adiacenti alla posizione originale
-    std::vector<Index> steps1;
-    for (int i = 0; i < 6; i++)
+    // La Ladybug fa esattamente: 2 passi sopra l'hive + 1 passo che scende su una
+    // cella vuota. Più step1 diversi possono portare allo stesso step2, e più step2
+    // diversi possono portare alla stessa cella d'arrivo: deduplichiamo entrambi i
+    // livelli con due bitmap statici, ripristinati solo nelle celle toccate.
+    static bool step2Seen[BoardSize];
+    static bool destSeen [BoardSize];
+
+    // Passo 1: i 6 vicini occupati. Sono già distinti, niente dedup.
+    Index steps1[6];
+    int   nSteps1 = 0;
+    for (int i = 0; i < 6; ++i)
     {
-        Index neighbor = pos + NeighborOffsets[i];
-        if (!IsValidIndex(neighbor)) continue;
-        if (!HasPieceAt(neighbor)) continue;
+        Index n = pos + NeighborOffsets[i];
+        if (!IsValidIndex(n)) continue;
+        if (!HasPieceAt(n)) continue;
         if (!CanSlide(pos, static_cast<Direction>(i), SlideMode::Beetle)) continue;
-        steps1.push_back(neighbor);
+        steps1[nSteps1++] = n;
     }
 
-    // Passo 2: celle occupate adiacenti a steps1
-    std::vector<Index> steps2;
-    for (Index step1 : steps1)
+    // Passo 2: celle occupate adiacenti a un step1, deduplicate.
+    Index steps2[6 * 6];
+    int   nSteps2 = 0;
+    for (int k = 0; k < nSteps1; ++k)
     {
-        for (int i = 0; i < 6; i++)
+        Index step1 = steps1[k];
+        for (int i = 0; i < 6; ++i)
         {
-            Index neighbor = step1 + NeighborOffsets[i];
-            if (!IsValidIndex(neighbor)) continue;
-            if (!HasPieceAt(neighbor)) continue;
-            if (neighbor == pos) continue;
+            Index n = step1 + NeighborOffsets[i];
+            if (!IsValidIndex(n) || !HasPieceAt(n) || n == pos) continue;
+            if (step2Seen[n]) continue;
             if (!CanSlide(step1, static_cast<Direction>(i), SlideMode::Beetle)) continue;
-            steps2.push_back(neighbor);
+            step2Seen[n] = true;
+            steps2[nSteps2++] = n;
         }
     }
 
-    // Passo 3: scende su celle vuote adiacenti a steps2
-    for (Index step2 : steps2)
+    // Passo 3: discesa su cella vuota adiacente a uno step2, deduplicata.
+    Index destsPushed[6 * 6];
+    int   nPushed = 0;
+    for (int k = 0; k < nSteps2; ++k)
     {
-        for (int i = 0; i < 6; i++)
+        Index step2 = steps2[k];
+        for (int i = 0; i < 6; ++i)
         {
-            Index neighbor = step2 + NeighborOffsets[i];
-            if (!IsValidIndex(neighbor)) continue;
-            if (HasPieceAt(neighbor)) continue;
-            if (neighbor == pos) continue;
+            Index n = step2 + NeighborOffsets[i];
+            if (!IsValidIndex(n) || HasPieceAt(n) || n == pos) continue;
+            if (destSeen[n]) continue;
             if (!CanSlide(step2, static_cast<Direction>(i), SlideMode::LadyBug)) continue;
-
-            Move move = {piece, pos, neighbor};
-            moves.push_back(move);
+            destSeen[n] = true;
+            destsPushed[nPushed++] = n;
+            moves.push_back({piece, pos, n});
         }
     }
+
+    // Reset mirato dei due bitmap.
+    for (int k = 0; k < nSteps2; ++k) step2Seen[steps2[k]]       = false;
+    for (int k = 0; k < nPushed; ++k) destSeen [destsPushed[k]]  = false;
 }
 
 void Board::GetPillbugMoves(PieceName piece, std::vector<Move>& moves) const
@@ -660,26 +738,28 @@ void Board::GetMosquitoMoves(PieceName piece, std::vector<Move>& moves) const
     // Tipi di insetti adiacenti già processati (per evitare duplicati)
     bool processedTypes[static_cast<int>(BugType::NumBugTypes)] = { false };
 
-    for (int i = 0; i < 6; i++)
+    // I generatori che copieremo possono produrre la stessa cella d'arrivo: QueenBee,
+    // Pillbug (slide-1), Beetle (su cella vuota), Spider, Grasshopper, Ladybug.
+    // Ricordiamo dove inizia la coda delle mosse della Mosquito per deduplicarle in fondo.
+    size_t tailStart = moves.size();
+
+    for (int i = 0; i < 6; ++i)
     {
         Index neighborPos = pos + NeighborOffsets[i];
-        if (!IsValidIndex(neighborPos)) continue;
-        if (!HasPieceAt(neighborPos)) continue;
+        if (!IsValidIndex(neighborPos) || !HasPieceAt(neighborPos)) continue;
 
-        PieceName neighborPiece = GetPieceAt(neighborPos);
-        BugType type = GetBugType(neighborPiece);
+        BugType type = GetBugType(GetPieceAt(neighborPos));
 
-        // La Mosquito non può copiare se stessa o un'altra Mosquito
+        // La Mosquito non copia se stessa o un'altra Mosquito.
         if (type == BugType::Mosquito) continue;
-
-        // Evita di processare due volte lo stesso tipo
+        // Stesso tipo già processato da un altro vicino: salta.
         if (processedTypes[static_cast<int>(type)]) continue;
         processedTypes[static_cast<int>(type)] = true;
 
-        // Pillbug: la special ability funziona anche quando pinnata
+        // Pillbug: la special ability funziona anche se la Mosquito è pinnata.
         if (type == BugType::Pillbug) { GetPillbugMoves(piece, moves); continue; }
 
-        // Gli altri tipi richiedono che la Mosquito possa muoversi
+        // Tutti gli altri tipi richiedono che la Mosquito si possa muovere.
         if (!canMove) continue;
 
         switch (type)
@@ -693,6 +773,29 @@ void Board::GetMosquitoMoves(PieceName piece, std::vector<Move>& moves) const
             default: break;
         }
     }
+
+    // Dedup in-place dei soli self-move della Mosquito (Piece == piece && Source == pos).
+    // I lanci generati da GetPillbugMoves hanno Piece diverso e passano invariati.
+    static bool destSeen[BoardSize];
+    size_t write = tailStart;
+    for (size_t r = tailStart; r < moves.size(); ++r)
+    {
+        const Move& m = moves[r];
+        const bool isSelfMove = (m.Piece == piece) && (m.Source == pos);
+        if (isSelfMove)
+        {
+            if (destSeen[m.Destination]) continue;
+            destSeen[m.Destination] = true;
+        }
+        moves[write++] = m;
+    }
+    // Reset mirato del bitmap.
+    for (size_t r = tailStart; r < write; ++r)
+    {
+        const Move& m = moves[r];
+        if (m.Piece == piece && m.Source == pos) destSeen[m.Destination] = false;
+    }
+    moves.resize(write);
 }
 
 void Board::GetValidMoves(std::vector<Move>& moves) const
@@ -774,15 +877,10 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
         }
     }
 
-    // DEDUPLICAZIONE: alcune funzioni (Ladybug, Mosquito+Pillbug) possono generare la stessa mossa più volte.
-    // Sort + unique richiede che i duplicati siano adiacenti.
-    {
-        std::unordered_set<size_t> seen;
-        auto it = std::remove_if(moves.begin(), moves.end(), [&](const Move& m) {
-            return !seen.insert(hash(m)).second;
-        });
-        moves.erase(it, moves.end());
-    }
+    // Rimuove i duplicati residui (lancio del Pillbug che coincide con la mossa
+    // normale del pezzo lanciato, due Pillbug-attori che lanciano lo stesso pezzo
+    // nella stessa cella, ecc.).
+    DedupMoves(moves);
 
     // Se non ci sono mosse valide, l'unica opzione è passare
     if (moves.empty())
