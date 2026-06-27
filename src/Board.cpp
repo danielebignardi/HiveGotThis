@@ -27,6 +27,12 @@ static inline void BeginVisit()
     if (++visitEpoch == 0) { memset(visited, 0, sizeof(visited)); visitEpoch = 1; }
 }
 
+// Scratch per la DFS dei punti di articolazione (vedi EnsureHiveAnalysisCurrent).
+// Non vanno azzerati: disc/low di una cella si leggono solo dopo averla visitata
+// nell'epoca corrente, quando sono già stati scritti.
+static int dfsDisc[BoardSize];
+static int dfsLow[BoardSize];
+
 // Una Move è identificata univocamente da (Piece, Destination): la Source dipende dallo
 // stato del pezzo (NullIndex se in mano, posizione attuale altrimenti) e non aggiunge
 // informazione. Deduplichiamo con un bitmap statico [NumPieceNames][BoardSize] ripristinato
@@ -108,6 +114,9 @@ PieceName Board::PopAt(Index position)
         // Aggiorna hash
         currentHash ^= (ZobristTable[topPiece][position] ^ ZobristLevel[topPiece][h]);
 
+        // L'occupazione è cambiata: l'analisi dei pezzi pinnati va ricalcolata.
+        hiveVersion++;
+
         return topPiece;
     }
     else
@@ -131,6 +140,9 @@ void Board::PushAt(PieceName pieceName, Index position)
 
     // Aggiorna altezza
     stackHeight[position]++;
+
+    // L'occupazione è cambiata: l'analisi dei pezzi pinnati va ricalcolata.
+    hiveVersion++;
 }
 
 void Board::MovePiece(PieceName pieceName, Index newPosition)
@@ -268,9 +280,72 @@ bool Board::CanMoveWithoutBreakingHive(PieceName piece) const
     // Ha un pezzo sotto: rimuoverlo non rompe l'hive (la casella resta occupata).
     if (below[piece] != PieceName::INVALID) return true;
 
-    // Unico pezzo nella casella: rompe l'hive sse rimuovendolo i pezzi restanti
-    // non sono più tutti connessi. Lo verifica una BFS che ignora 'pos'.
-    return IsOneHive(pos);
+    // Unico pezzo nella casella: rompe l'hive sse la sua casella è un punto di
+    // articolazione del grafo delle celle occupate (rimuoverla disconnette i pezzi
+    // restanti). Invece di una BFS per ogni pezzo (costo O(pezzi^2) per posizione),
+    // calcoliamo tutti i punti di articolazione in una sola DFS e li mettiamo in cache.
+    EnsureHiveAnalysisCurrent();
+    return !pinnedByHive[piece];
+}
+
+// Aggiorna pinnedByHive[] per la posizione corrente, se non già valido.
+// Una sola DFS di Tarjan trova tutti i punti di articolazione del grafo delle celle
+// occupate (i nodi sono le celle, gli archi l'adiacenza esagonale): un pezzo è pinnato
+// se è l'unico nella sua casella (altezza 1) e quella casella è un punto di articolazione.
+// Gestisce correttamente i cicli dell'hive, dove il test "locale" sui vicini fallirebbe.
+// Il risultato vale finché l'occupazione non cambia (cache su hiveVersion).
+void Board::EnsureHiveAnalysisCurrent() const
+{
+    if (hiveAnalyzedVersion == hiveVersion) return;
+    hiveAnalyzedVersion = hiveVersion;
+
+    memset(pinnedByHive, 0, sizeof(pinnedByHive));
+
+    // Una cella occupata qualsiasi come radice: l'hive è connesso per invariante.
+    Index root = NullIndex;
+    for (int p = 0; p < NumPieceNames; ++p)
+        if (piecesPositions[p] != NullIndex) { root = piecesPositions[p]; break; }
+    if (root == NullIndex) return;   // board vuota
+
+    BeginVisit();
+    int timer = 0;
+    ArticulationDFS(root, NullIndex, timer);
+}
+
+// DFS di Tarjan per i punti di articolazione. disc[u] = ordine di scoperta di u;
+// low[u] = disc minima raggiungibile dal sottoalbero di u tramite un solo arco
+// all'indietro. u (non radice) è articolazione se ha un figlio v con low[v] >= disc[u];
+// la radice lo è se ha più di un figlio nella DFS.
+void Board::ArticulationDFS(Index u, Index parent, int& timer) const
+{
+    visited[u] = visitEpoch;
+    dfsDisc[u] = dfsLow[u] = ++timer;
+    int children = 0;
+
+    for (int i = 0; i < 6; ++i)
+    {
+        Index v = u + NeighborOffsets[i];
+        if (!IsValidIndex(v) || !HasPieceAt(v) || v == parent) continue;
+
+        if (visited[v] == visitEpoch)
+        {
+            // Arco all'indietro: v è già nello stack della DFS.
+            if (dfsDisc[v] < dfsLow[u]) dfsLow[u] = dfsDisc[v];
+            continue;
+        }
+
+        ++children;
+        ArticulationDFS(v, u, timer);
+        if (dfsLow[v] < dfsLow[u]) dfsLow[u] = dfsLow[v];
+
+        // u taglia il sottoalbero di v dal resto dell'hive: è un punto di articolazione.
+        // Pinniamo solo se nella casella c'è un unico pezzo (altezza 1).
+        if (parent != NullIndex && dfsLow[v] >= dfsDisc[u] && stackHeight[u] == 1)
+            pinnedByHive[cells[u]] = true;
+    }
+
+    if (parent == NullIndex && children > 1 && stackHeight[u] == 1)
+        pinnedByHive[cells[u]] = true;
 }
 
 // true se le celle occupate, escludendo 'ignorePos', formano un unico blocco connesso.
