@@ -109,12 +109,60 @@ GameType GetGameTypeValue(const char *str);
 bool GameInProgress(BoardState const &value);
 bool GameIsOver(BoardState const &value);
 
-Color GetColor(PieceName p);
+// Definite inline in header: sono chiamate milioni di volte nei loop di generazione
+// mosse; tenerle qui permette al compilatore di inlinearle (niente call cross-TU).
+inline Color GetColor(PieceName p)
+{
+    return (p < PieceName::bQ) ? Color::White : Color::Black;
+}
 
-BugType GetBugType(PieceName p);
+inline BugType GetBugType(PieceName p)
+{
+    uint8_t id = p;
+
+    // Se è un pezzo nero, sottraiamo 14 per trattarlo come bianco
+    if (id >= 14 && id < 28)
+    {
+        id -= 14;
+    }
+
+    switch (id)
+    {
+        case PieceName::wQ:  return BugType::QueenBee;
+        case PieceName::wS1:
+        case PieceName::wS2: return BugType::Spider;
+        case PieceName::wB1:
+        case PieceName::wB2: return BugType::Beetle;
+        case PieceName::wG1:
+        case PieceName::wG2:
+        case PieceName::wG3: return BugType::Grasshopper;
+        case PieceName::wA1:
+        case PieceName::wA2:
+        case PieceName::wA3: return BugType::SoldierAnt;
+        case PieceName::wM:  return BugType::Mosquito;
+        case PieceName::wL:  return BugType::Ladybug;
+        case PieceName::wP:  return BugType::Pillbug;
+        default:             return BugType::INVALID;
+    }
+}
 
 // Controlla se il pezzo è legale per il tipo di partita corrente
-bool PieceNameIsEnabledForGameType(PieceName p, GameType gt);
+inline bool PieceNameIsEnabledForGameType(PieceName p, GameType gt)
+{
+    switch (GetBugType(p))
+    {
+        case BugType::Mosquito:
+            return (gt == GameType::BaseM || gt == GameType::BaseML || gt == GameType::BaseMP || gt == GameType::BaseMLP);
+        case BugType::Ladybug:
+            return (gt == GameType::BaseL || gt == GameType::BaseML || gt == GameType::BaseLP || gt == GameType::BaseMLP);
+        case BugType::Pillbug:
+            return (gt == GameType::BaseP || gt == GameType::BaseMP || gt == GameType::BaseLP || gt == GameType::BaseMLP);
+        case BugType::INVALID:
+            return false;
+        default:
+            return true; // I pezzi base sono sempre ammessi
+    }
+}
 
 bool IsPieceNameValid(PieceName p);
 

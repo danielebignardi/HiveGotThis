@@ -20,7 +20,7 @@ add_executable(HiveEngine src/main.cpp)
 target_link_libraries(HiveEngine hive_core)
 
 # Test (escluso TestMoves: usa API Unix non disponibili su Windows)
-foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestIsPinned TestEncoderShapes TestEdgeAlignment)
+foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestIsPinned TestEncoderShapes TestEdgeAlignment TestPerft)
     add_executable(${test} tests/${test}.cpp)
     target_link_libraries(${test} hive_core)
 endforeach()
