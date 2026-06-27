@@ -1,16 +1,36 @@
 #include "Board.h"
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
 #include <random>
 
 namespace HiveGotThis
 {
 
-// Una Move è univocamente identificata da (Piece, Destination): la Source dipende
-// dallo stato del pezzo (NullIndex se in mano, posizione attuale altrimenti) e quindi
-// non aggiunge informazione. Usiamo un bitmap statico [NumPieceNames][BoardSize]
-// (229 KB, azzerato una volta dal loader) e lo ripristiniamo solo per le celle
-// effettivamente marcate, evitando il costo di un unordered_set per ogni chiamata.
+// Insieme delle celle "visitate" da una traversata, senza azzeramento per chiamata.
+// Invece di un array bool ripulito con memset (16 KB) a ogni chiamata, ogni cella
+// memorizza l'EPOCA dell'ulno a visita: la cella è visitata sse visited[i] == visitEpoch.
+// Per ricominciare da zero basta incrementare visitEpoch, che invalida in blocco e in
+// O(1) tutti i timbri precedenti. Idioma d'uso:
+//   - inizio traversata: BeginVisit();         (rimette tutto a "non visitato")
+//   - marca cella i:     visited[i] = visitEpoch;
+//   - smarca cella i:    visited[i] = 0;        (0 != visitEpoch, che è sempre >= 1)
+//   - test cella i:      visited[i] == visitEpoch
+// L'unico memset reale avviene al wrap del contatore a 32 bit (~4 miliardi di chiamate).
+// È stato globale condiviso: una sola traversata attiva per volta, e i generatori che lo
+// usano non si annidano mai a vicenda.
+static uint32_t visited[BoardSize];
+static uint32_t visitEpoch = 0;
+
+static inline void BeginVisit()
+{
+    if (++visitEpoch == 0) { memset(visited, 0, sizeof(visited)); visitEpoch = 1; }
+}
+
+// Una Move è identificata univocamente da (Piece, Destination): la Source dipende dallo
+// stato del pezzo (NullIndex se in mano, posizione attuale altrimenti) e non aggiunge
+// informazione. Deduplichiamo con un bitmap statico [NumPieceNames][BoardSize] ripristinato
+// solo nelle celle marcate, evitando il costo di un unordered_set a ogni chiamata.
 static void DedupMoves(std::vector<Move>& moves)
 {
     static bool seen[NumPieceNames][BoardSize];
@@ -245,82 +265,64 @@ bool Board::CanMoveWithoutBreakingHive(PieceName piece) const
     // Coperto da un altro pezzo (es. uno scarabeo sopra): pinnato.
     if (GetPieceAt(pos) != piece) return false;
 
-    // Ha un pezzo sotto: rimuoverlo non rompe l'hive (qualcosa resta nella casella).
+    // Ha un pezzo sotto: rimuoverlo non rompe l'hive (la casella resta occupata).
     if (below[piece] != PieceName::INVALID) return true;
 
-    // Unico pezzo nella casella: simulazione con BFS treating pos come vuota.
+    // Unico pezzo nella casella: rompe l'hive sse rimuovendolo i pezzi restanti
+    // non sono più tutti connessi. Lo verifica una BFS che ignora 'pos'.
     return IsOneHive(pos);
 }
 
+// true se le celle occupate, escludendo 'ignorePos', formano un unico blocco connesso.
+// Usato per la regola dell'hive: simula la rimozione di un pezzo e controlla la connessione.
 bool Board::IsOneHive(Index ignorePos) const
 {
-    // PREPARAZIONE BFS
-    bool visitedPieces[NumPieceNames] = { false };              // Pezzi già visitati
-    static std::vector<Index> queue;                            // Nodi nel BFS
+    bool visitedPieces[NumPieceNames] = { false };
+    static std::vector<Index> queue;
     queue.clear();
     queue.reserve(NumPieceNames);
-    
-    // CONTEGGIO DEI NODI
-    int nodesFound = 0;
-    int nodesExpected = 0;
-    Index startNode = NullIndex;
 
-    // Conta i nodi attesi (ovvero il numero di posizioni occupate esclusa ignorePos) e trova startNode
-    for (int i = 0; i < NumPieceNames; ++i) {
+    // Conta i pezzi attesi (in cima alla pila, esclusa ignorePos) e scegli una radice.
+    int   nodesExpected = 0;
+    Index startNode     = NullIndex;
+    for (int i = 0; i < NumPieceNames; ++i)
+    {
         Index pos = piecesPositions[i];
-        
-        // Se non in gioco o è nella casella ignorata
         if (pos == NullIndex || pos == ignorePos) continue;
-
-        // Se è il pezzo in cima alla pila
-        if (PieceIsOnTop(static_cast<PieceName>(i))) {
+        if (PieceIsOnTop(static_cast<PieceName>(i)))
+        {
             nodesExpected++;
             if (startNode == NullIndex) startNode = pos;
         }
     }
 
-    if (nodesExpected == 0) return true;
+    if (nodesExpected == 0) return true;   // niente da connettere
 
-    // BFS
+    // BFS dalla radice attraverso i vicini occupati (cursore 'head' invece di pop).
     queue.push_back(startNode);
-    
-    // Segniamo come visitato il pezzo che si trova a startNode
-    PieceName startPiece = cells[startNode];
-    visitedPieces[startPiece] = true;
-    nodesFound++;
+    visitedPieces[cells[startNode]] = true;
+    int nodesFound = 1;
 
-    // Loop BFS (usando indice 'head' invece di pop)
     int head = 0;
-    while(head < (int)queue.size()) {
-        Index currentPos = queue[head++]; // Leggi e avanza cursore
-
-        // Controlla i 6 vicini
-        for (int offset : NeighborOffsets) {
+    while (head < (int)queue.size())
+    {
+        Index currentPos = queue[head++];
+        for (int offset : NeighborOffsets)
+        {
             Index neighborPos = currentPos + offset;
+            if (!IsValidIndex(neighborPos) || neighborPos == ignorePos) continue;
 
-            // Controlla che il vicino sia una cella valida
-            if (!IsValidIndex(neighborPos)) continue;
-
-            // Ignora la casella "rimossa"
-            if (neighborPos == ignorePos) continue;
-
-            // Leggi chi c'è
             PieceName neighborPiece = cells[neighborPos];
+            if (neighborPiece == PieceName::INVALID) continue;   // cella vuota
+            if (visitedPieces[neighborPiece]) continue;          // già contato
 
-            // Se vuoto, salta
-            if (neighborPiece == PieceName::INVALID) continue;
-
-            // Se già visitato, salta
-            if (visitedPieces[neighborPiece]) continue;
-
-            // Trovato nuovo pezzo connesso!
-            visitedPieces[neighborPiece] = true; // Segna come visto
-            queue.push_back(neighborPos);        // Aggiungi alla coda
+            visitedPieces[neighborPiece] = true;
+            queue.push_back(neighborPos);
             nodesFound++;
         }
     }
 
-    // VERDETTO
+    // Connesso sse abbiamo raggiunto tutti i pezzi attesi.
     return nodesFound == nodesExpected;
 }
 
@@ -434,14 +436,14 @@ void Board::GetEmptyNeighbors(Index pos, std::vector<Index>& result) const
     }
 }
 
-void Board::GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result, Index ignorePos) const
+void Board::GetOneSlideSteps(Index from, SlideMode mode, std::vector<Index>& result, Index ignorePos) const
 {
     for (int i = 0; i < 6; i++)
     {
         Index neighbor = from + NeighborOffsets[i];
         if (!IsValidIndex(neighbor)) continue;
         if (mode == SlideMode::Ground && HasPieceAt(neighbor)) continue;    // se siamo in modalità Ground allora saltiamo le celle su cui c'è già un pezzo
-        if (visited[neighbor]) continue;
+        if (visited[neighbor] == visitEpoch) continue;
         if (!CanSlide(from, static_cast<Direction>(i), mode, ignorePos)) continue;
         result.push_back(neighbor);
     }
@@ -457,12 +459,12 @@ void Board::GetQueenBeeMoves(PieceName piece, std::vector<Move>& moves) const
 
     Index pos = piecesPositions[piece];
 
-    static bool visited[BoardSize];         // static così viene allocato solo una volta
-    memset(visited, 0, sizeof(visited));
-    visited[pos] = true;
+    BeginVisit();
+    visited[pos] = visitEpoch;
 
-    std::vector<Index> steps;
-    GetOneSlideSteps(pos, SlideMode::Ground, visited, steps);
+    static std::vector<Index> steps;        // buffer riusato: niente malloc per chiamata
+    steps.clear();
+    GetOneSlideSteps(pos, SlideMode::Ground, steps);
 
     for (Index dest : steps)
     {
@@ -477,12 +479,12 @@ void Board::GetBeetleMoves(PieceName piece, std::vector<Move>& moves) const
 
     Index pos = piecesPositions[piece];
 
-    static bool visited[BoardSize];
-    memset(visited, 0, sizeof(visited));
-    visited[pos] = true;
+    BeginVisit();
+    visited[pos] = visitEpoch;
 
-    std::vector<Index> steps;
-    GetOneSlideSteps(pos, SlideMode::Beetle, visited, steps);
+    static std::vector<Index> steps;        // buffer riusato: niente malloc per chiamata
+    steps.clear();
+    GetOneSlideSteps(pos, SlideMode::Beetle, steps);
 
     for (Index dest : steps)
     {
@@ -524,30 +526,29 @@ void Board::GetSpiderMoves(PieceName piece, std::vector<Move>& moves) const
 
     Index pos = piecesPositions[piece];
 
-    // celle già visitate
-    static bool visited[BoardSize];
-    memset(visited, 0, sizeof(visited));
+    BeginVisit();
 
-    // indici raggiungibili ad ognuno dei 3 passi
-    std::vector<Index> steps1, steps2, steps3;
+    // Indici raggiungibili a ciascuno dei 3 passi (buffer riusati fra le chiamate).
+    static std::vector<Index> steps1, steps2, steps3;
+    steps1.clear();
 
     // inizio: indici raggiungibili dopo un passo
-    visited[pos] = true;
-    GetOneSlideSteps(pos, SlideMode::Ground, visited, steps1, pos);
+    visited[pos] = visitEpoch;
+    GetOneSlideSteps(pos, SlideMode::Ground, steps1, pos);
 
     for (Index step1 : steps1)
     {
-        visited[step1] = true;
+        visited[step1] = visitEpoch;
 
         steps2.clear();
-        GetOneSlideSteps(step1, SlideMode::Ground, visited, steps2, pos);
+        GetOneSlideSteps(step1, SlideMode::Ground, steps2, pos);
 
         for (Index step2 : steps2)
         {
-            visited[step2] = true;
+            visited[step2] = visitEpoch;
 
             steps3.clear();
-            GetOneSlideSteps(step2, SlideMode::Ground, visited, steps3, pos);
+            GetOneSlideSteps(step2, SlideMode::Ground, steps3, pos);
 
             for (Index step3 : steps3)
             {
@@ -555,10 +556,10 @@ void Board::GetSpiderMoves(PieceName piece, std::vector<Move>& moves) const
                 moves.push_back(move);
             }
 
-            visited[step2] = false;
+            visited[step2] = 0;     // backtrack: la cella torna libera per altri rami
         }
 
-        visited[step1] = false;
+        visited[step1] = 0;
     }
 }
 
@@ -568,25 +569,24 @@ void Board::GetSoldierAntMoves(PieceName piece, std::vector<Move>& moves) const
 
     Index pos = piecesPositions[piece];
 
-    // Posizioni già visitate
-    static bool visited[BoardSize];
-    memset(visited, 0, sizeof(visited));
-    visited[pos] = true;
+    BeginVisit();
+    visited[pos] = visitEpoch;
 
-    // Posizioni visitabili, iniziamo a riempirle con i vicini
-    std::vector<Index> queue;
-    GetOneSlideSteps(pos, SlideMode::Ground, visited, queue, pos);
-    for (Index cell : queue) visited[cell] = true;
+    // Frontiera della BFS: partiamo dai vicini scivolabili (buffer riusato).
+    static std::vector<Index> queue;
+    queue.clear();
+    GetOneSlideSteps(pos, SlideMode::Ground, queue, pos);
+    for (Index cell : queue) visited[cell] = visitEpoch;
 
     int head = 0;
     while (head < (int)queue.size()) {
         Index current = queue[head++];
         int sizeBefore = queue.size();
-        GetOneSlideSteps(current, SlideMode::Ground, visited, queue, pos);
+        GetOneSlideSteps(current, SlideMode::Ground, queue, pos);
 
         // Segna subito come visitati i nuovi nodi aggiunti
         for (int i = sizeBefore; i < (int)queue.size(); i++)
-            visited[queue[i]] = true;
+            visited[queue[i]] = visitEpoch;
     }
 
     for (Index cell : queue)
@@ -813,7 +813,8 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     int queenDeadline = (currentColor == Color::White) ? 6 : 7;             // turno entro il quale la regina in questione deve essere piazzata
     bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline); 
 
-    std::vector<Index> positions;
+    static std::vector<Index> positions;    // buffer riusato: niente malloc per chiamata
+    positions.clear();
     GetValidPlacements(currentColor, positions);
 
     if (mustPlaceQueen)
@@ -823,31 +824,37 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
         return;
     }
 
-    // Piazzamento: combina ogni posizione valida con ogni pezzo in mano
-    for (Index dest : positions)
+    // Quali pezzi in mano sono piazzabili NON dipende dalla posizione di destinazione:
+    // lo calcoliamo una volta sola, poi per ogni cella valida emettiamo la lista.
+    // (Prima questo filtro O(NumPieceNames) girava per OGNI destinazione.)
+    static PieceName placeable[NumPieceNames];
+    int nPlaceable = 0;
+    for (int p = 0; p < NumPieceNames; p++)
     {
-        for (int p = 0; p < NumPieceNames; p++)
-        {
-            PieceName piece = static_cast<PieceName>(p);
-            if (GetColor(piece) != currentColor) continue;
-            if (!PieceInHand(piece)) continue;
-            if (!PieceNameIsEnabledForGameType(piece, gameType)) continue;
+        PieceName piece = static_cast<PieceName>(p);
+        if (GetColor(piece) != currentColor) continue;
+        if (!PieceInHand(piece)) continue;
+        if (!PieceNameIsEnabledForGameType(piece, gameType)) continue;
 
-            // Regola: la queenBee non può essere piazzata al primo turno del proprio colore
-            if (piece == queen && currentTurn <= 1) continue;
+        // Regola: la queenBee non può essere piazzata al primo turno del proprio colore
+        if (piece == queen && currentTurn <= 1) continue;
 
-            // Regola Mzinga: un pezzo numerato non può essere piazzato se il precedente è ancora in mano
-            // (es. non si può piazzare WS2 se WS1 non è ancora sulla board)
-            if (piece > 0) {
-                PieceName prev = static_cast<PieceName>(piece - 1);
-                if (GetColor(prev) == currentColor &&
-                    GetBugType(prev) == GetBugType(piece) &&
-                    PieceInHand(prev)) continue;
-            }
-
-            moves.push_back({piece, NullIndex, dest});
+        // Regola Mzinga: un pezzo numerato non può essere piazzato se il precedente è ancora in mano
+        // (es. non si può piazzare WS2 se WS1 non è ancora sulla board)
+        if (piece > 0) {
+            PieceName prev = static_cast<PieceName>(piece - 1);
+            if (GetColor(prev) == currentColor &&
+                GetBugType(prev) == GetBugType(piece) &&
+                PieceInHand(prev)) continue;
         }
+
+        placeable[nPlaceable++] = piece;
     }
+
+    // Piazzamento: combina ogni posizione valida con ogni pezzo piazzabile
+    for (Index dest : positions)
+        for (int k = 0; k < nPlaceable; k++)
+            moves.push_back({placeable[k], NullIndex, dest});
 
     // Movimento: per ogni pezzo in gioco del colore corrente
     // La Regina deve essere in gioco per poter muovere altri pezzi
@@ -940,24 +947,24 @@ void Board::GetValidPlacements(Color color, std::vector<Index>& positions) const
         return;
     }
 
-    bool candidateAdded[BoardSize];
-    memset(candidateAdded, 0, sizeof(candidateAdded));
+    // visited marca le celle candidate già aggiunte, per non duplicarle.
+    BeginVisit();
 
-    // logica: per ogni pezzo sulla board, vediamo quali tra i suoi 6 vicini sono liberi e quelli liberi saranno validi
+    // Per ogni pezzo sulla board, le sue celle vuote adiacenti sono candidate al piazzamento.
     for (int p = 0; p < NumPieceNames; p++)
     {
-        if (PieceInHand(static_cast<PieceName>(p))) continue; // cerchiamo i pezzi già sulla board
+        if (PieceInHand(static_cast<PieceName>(p))) continue; // solo pezzi già sulla board
 
-        Index pos = piecesPositions[p]; // posizione del pezzo considerato
+        Index pos = piecesPositions[p];
 
         for (int i = 0; i < 6; i++)
         {
             Index neighbor = pos + NeighborOffsets[i];
             if (!IsValidIndex(neighbor)) continue;
-            if (candidateAdded[neighbor]) continue;
+            if (visited[neighbor] == visitEpoch) continue;
             if (!CanPlaceAt(neighbor, color, currentTurn)) continue;
 
-            candidateAdded[neighbor] = true;
+            visited[neighbor] = visitEpoch;
             positions.push_back(neighbor);
         }
     }

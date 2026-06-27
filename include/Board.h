@@ -140,8 +140,9 @@ class Board
         };
 
         // Restituisce gli indici dei vicini verso i quali si può spostare, eccetto quelli già visitati
+        // (le celle visitate sono lette dall'array epoca 'visited' file-local di Board.cpp)
         // ignorePos: propagato a CanSlide per ignorare la posizione di partenza del pezzo in movimento
-        void GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result, Index ignorePos = NullIndex) const;
+        void GetOneSlideSteps(Index from, SlideMode mode, std::vector<Index>& result, Index ignorePos = NullIndex) const;
 
 
 
@@ -233,7 +234,7 @@ class Board
 
         void ApplyTurnEffects();
         void ToggleColor();
-};   
+};
 
 
 

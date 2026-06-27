@@ -23,7 +23,17 @@ static uint64_t Perft(Board& board, int depth)
 {
     if (depth == 0) return 1;
 
-    std::vector<Move> moves;
+    // Pool di buffer indicizzato per profondità: ogni livello di ricorsione riusa
+    // il proprio vector, eliminando un'allocazione per nodo. I fratelli allo stesso
+    // livello lo riusano in sequenza (un figlio termina prima del successivo), e la
+    // ricorsione scende sempre a depth-1 (buffer diverso), quindi il buffer del
+    // livello corrente resta valido mentre lo iteriamo. La pool cresce solo al primo
+    // ingresso a ciascuna profondità, mai durante la ricorsione: la reference è stabile.
+    static std::vector<std::vector<Move>> pool;
+    if (static_cast<int>(pool.size()) <= depth) pool.resize(depth + 1);
+    std::vector<Move>& moves = pool[depth];
+    moves.clear();
+
     board.GetValidMoves(moves);
 
     // Ottimizzazione tipica del perft: a profondità 1 il numero di foglie
