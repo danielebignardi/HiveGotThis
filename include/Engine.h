@@ -84,6 +84,12 @@ private:
     // "features" - Esporta le graph features della board corrente in JSON.
     void CommandFeatures();
 
+    // "perft [depth]" - Conta le foglie dell'albero delle mosse fino a 'depth' a
+    // partire dalla posizione corrente, stampando conteggio e tempo per ogni livello.
+    // Utile come benchmark della generazione mosse da posizioni arbitrarie (non solo
+    // dalla board vuota) e come oracolo di correttezza verso altri motori.
+    void CommandPerft(const std::string& param);
+
     // -------------------------------------------------------------------------
     // LOGICA DI GIOCO INTERNA
     // -------------------------------------------------------------------------

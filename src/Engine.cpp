@@ -115,6 +115,13 @@ void Engine::Run()
             else
                 CommandFeatures();
         }
+        else if (command == CommandString_Perft)
+        {
+            if (m_board == nullptr)
+                WriteError(ErrorMessage_NoGameInProgress);
+            else
+                CommandPerft(param);
+        }
         else if (command == CommandString_Exit)
         {
             break;
@@ -479,6 +486,48 @@ void Engine::CommandFeatures()
 {
     GNNGraph graph = BoardEncoder::encode(*m_board);
     std::cout << GNNGraphToJson(graph) << "\n";
+    WriteOk();
+}
+
+// Perft ricorsivo sulla board corrente, con do/undo per non allocare board nuove.
+static uint64_t PerftRec(Board& board, int depth)
+{
+    if (depth == 0) return 1;
+
+    std::vector<Move> moves;
+    board.GetValidMoves(moves);
+    if (depth == 1) return moves.size();
+
+    uint64_t nodes = 0;
+    MoveUndo undo;
+    for (const Move& m : moves)
+    {
+        board.ApplyMoveSavingUndo(m, undo);
+        nodes += PerftRec(board, depth - 1);
+        board.UndoMove(m, undo);
+    }
+    return nodes;
+}
+
+void Engine::CommandPerft(const std::string& param)
+{
+    int maxDepth = 4;
+    if (!param.empty())
+    {
+        try { maxDepth = std::stoi(param); }
+        catch (...) { WriteError("Parametro perft non valido: " + param); return; }
+    }
+
+    for (int d = 1; d <= maxDepth; ++d)
+    {
+        auto t0 = std::chrono::steady_clock::now();
+        uint64_t nodes = PerftRec(*m_board, d);
+        auto t1 = std::chrono::steady_clock::now();
+
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::cout << "perft(" << d << ") = " << nodes
+                  << "  time " << ms << " ms\n";
+    }
     WriteOk();
 }
 
