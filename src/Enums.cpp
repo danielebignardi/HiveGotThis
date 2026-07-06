@@ -214,59 +214,8 @@ bool GameIsOver(BoardState const &value)
     return !GameInProgress(value);
 }
 
-Color GetColor(PieceName p)
-{
-    return (p < PieceName::bQ) ? Color::White : Color::Black;
-}
-
-
-BugType GetBugType(PieceName p)
-{
-    uint8_t id = p;
-    
-    // Se è un pezzo nero, sottraiamo 14 per trattarlo come bianco
-    if (id >= 14 && id < 28) 
-    {
-        id -= 14; 
-    }
-
-    switch (id)
-    {
-        case PieceName::wQ:  return BugType::QueenBee;
-        case PieceName::wS1: 
-        case PieceName::wS2: return BugType::Spider;
-        case PieceName::wB1: 
-        case PieceName::wB2: return BugType::Beetle;
-        case PieceName::wG1: 
-        case PieceName::wG2: 
-        case PieceName::wG3: return BugType::Grasshopper;
-        case PieceName::wA1: 
-        case PieceName::wA2: 
-        case PieceName::wA3: return BugType::SoldierAnt;
-        case PieceName::wM:  return BugType::Mosquito;
-        case PieceName::wL:  return BugType::Ladybug;
-        case PieceName::wP:  return BugType::Pillbug;
-        default:             return BugType::INVALID;
-    }
-}
-
-bool PieceNameIsEnabledForGameType(PieceName p, GameType gt)
-{
-    BugType type = GetBugType(p);
-    switch (type)
-    {
-        case BugType::Mosquito:
-            return (gt == GameType::BaseM || gt == GameType::BaseML || gt == GameType::BaseMP || gt == GameType::BaseMLP);
-        case BugType::Ladybug:
-            return (gt == GameType::BaseL || gt == GameType::BaseML || gt == GameType::BaseLP || gt == GameType::BaseMLP);
-        case BugType::Pillbug:
-            return (gt == GameType::BaseP || gt == GameType::BaseMP || gt == GameType::BaseLP || gt == GameType::BaseMLP);
-        case BugType::INVALID:
-            return false;
-        default:
-            return true; // I pezzi base sono sempre ammessi
-    }
-}
+// GetColor, GetBugType e PieceNameIsEnabledForGameType sono definite inline in Enums.h
+// (chiamate nei loop caldi della generazione mosse: vanno inlineate cross-TU).
 
 bool IsPieceNameValid(PieceName p)
 {
