@@ -11,7 +11,14 @@
 #include <cstring>
 
 namespace HiveGotThis
-{  
+{
+
+// Stato salvato prima di ApplyMoveSavingUndo, necessario a UndoMove per ripristinare la board.
+struct MoveUndo
+{
+    BoardState prevBoardState;
+    bool       prevCannotBeMoved[NumPieceNames];
+};
 
 class Board
 {
@@ -81,6 +88,12 @@ class Board
         // Da chiamare dopo ogni mossa/piazzamento: aggiorna cannotBeMoved, currentTurn, currentColor.
         void ApplyMove(const Move& move);
 
+        // Come ApplyMove ma salva in undo le informazioni necessarie a invertirla.
+        void ApplyMoveSavingUndo(const Move& move, MoveUndo& undo);
+
+        // Inverte una mossa applicata con ApplyMoveSavingUndo, ripristinando lo stato precedente.
+        void UndoMove(const Move& move, const MoveUndo& undo);
+
         // Imposta boardState = InProgress (da chiamare all'avvio di una partita)
         void StartGame();
         
@@ -93,6 +106,10 @@ class Board
 
         // true se la configurazione attuale della board è un solo hive (condizione che deve essere garantita)
         bool IsOneHive(Index ignorePos) const;
+
+        // Ricalcola, se necessario, quali pezzi sono pinnati (vedi pinnedByHive) con una
+        // sola DFS dei punti di articolazione. Idempotente: usa la cache su hiveVersion.
+        void EnsureHiveAnalysisCurrent() const;
 
         // true se la regina del colore indicato è sulla board ed è completamente circondata (tutti e 6 i vicini occupati)
         bool IsQueenSurrounded(Color color) const;
@@ -127,8 +144,9 @@ class Board
         };
 
         // Restituisce gli indici dei vicini verso i quali si può spostare, eccetto quelli già visitati
+        // (le celle visitate sono lette dall'array epoca 'visited' file-local di Board.cpp)
         // ignorePos: propagato a CanSlide per ignorare la posizione di partenza del pezzo in movimento
-        void GetOneSlideSteps(Index from, SlideMode mode, bool visited[], std::vector<Index>& result, Index ignorePos = NullIndex) const;
+        void GetOneSlideSteps(Index from, SlideMode mode, std::vector<Index>& result, Index ignorePos = NullIndex) const;
 
 
 
@@ -216,11 +234,27 @@ class Board
         // L' "impronta digitale" attuale della board
         uint64_t currentHash;
 
+        // - - - - - - - - - - ANALISI HIVE (PEZZI PINNATI) - - - - - - - - - -
+
+        // Versione della struttura dell'hive: incrementata a ogni cambio di occupazione
+        // (PushAt/PopAt). Serve a invalidare la cache pinnedByHive.
+        uint64_t hiveVersion = 0;
+
+        // Versione per cui pinnedByHive è valido (sentinella iniziale = "mai calcolato").
+        mutable uint64_t hiveAnalyzedVersion = static_cast<uint64_t>(-1);
+
+        // Per ogni pezzo: true se è l'unico nella sua casella e quella casella è un punto
+        // di articolazione dell'hive. Valido dopo EnsureHiveAnalysisCurrent.
+        mutable bool pinnedByHive[NumPieceNames];
+
+        // DFS di Tarjan: riempie pinnedByHive a partire da una cella radice.
+        void ArticulationDFS(Index u, Index parent, int& timer) const;
+
         // - - - - - - - - - - HELPER PRIVATI - - - - - - - - - -
 
         void ApplyTurnEffects();
         void ToggleColor();
-};   
+};
 
 
 

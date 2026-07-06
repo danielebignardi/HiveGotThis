@@ -62,9 +62,8 @@ static double PieceTypeQueenThreat(BugType type)
 // Pesi per le feature
 static constexpr double W_QUEEN_CAN_SLIDE     = 2.0;   // Per ogni direzione in cui la regina puo' effettivamente scivolare
 static constexpr double W_QUEEN_ESCAPE_EMPTY   = 0.5;   // Bonus base per ogni vicino vuoto (piu' leggero del can-slide)
-static constexpr double W_PINNED_OWN           = -0.6;  // Penalita' per ogni nostro pezzo bloccato
-static constexpr double W_PINNED_OPP           = 0.5;   // Bonus per ogni pezzo avversario bloccato
-static constexpr double W_MOBILE_PIECE         = 0.5;   // Bonus per ogni nostro pezzo mobile
+// Mobilita' e pin sono ora pesati per tipo (MobilityValueT / PinWeightT, vedi sotto):
+// una formica libera/pinnata pesa molto piu' di un ragno o una cavalletta.
 static constexpr double W_BURIED_OWN           = -2.0;  // Penalita' per ogni nostro pezzo sepolto
 static constexpr double W_BURIED_OPP           = 2.0;   // Bonus per ogni pezzo avversario sepolto
 static constexpr double W_DIST2_THREAT         = 0.7;   // Pezzo mobile a distanza 2 dalla regina avversaria
@@ -93,6 +92,14 @@ static double PieceDevelopmentValue(BugType type)
         default:                   return 0.0;
     }
 }
+
+// Tabelle per tipo (BugType: Queen=0,Spider=1,Beetle=2,Grasshopper=3,Ant=4,Mosquito=5,Ladybug=6,Pillbug=7)
+// La formica e' il pezzo che domina la mobilita': libera vale molto, pinnata e' un disastro
+// ("a pinned Ant is a worthless Ant", Ingersoll cap. 8.1).
+static constexpr double MobilityValueT[8] = { 0.3, 0.4, 0.7, 0.5, 1.3, 0.9, 0.7, 0.5 };
+static constexpr double PinWeightT[8]     = { 0.5, 0.4, 0.6, 0.5, 1.5, 0.9, 0.6, 0.6 };
+static inline double MobilityValueOf(BugType t){ return MobilityValueT[static_cast<uint8_t>(t)]; }
+static inline double PinWeightOf(BugType t){ return PinWeightT[static_cast<uint8_t>(t)]; }
 
 
 // Conta le direzioni in cui la regina puo' effettivamente scivolare via (CanSlide ground)
@@ -320,8 +327,6 @@ static double ComputeColorScore(const Board& board, Color color, Color opponent,
     // =========================================================================
     // FEATURE 7: Sviluppo, mobilita', pinning, pezzi sepolti
     // =========================================================================
-    int mobilePieces = 0;
-    int pinnedPieces = 0;
     int buriedPieces = 0;
 
     for (uint8_t p = myStart; p <= myEnd; p++)
@@ -338,9 +343,9 @@ static double ComputeColorScore(const Board& board, Color color, Color opponent,
             if (board.PieceIsOnTop(piece))
             {
                 if (!board.cannotBeMoved[piece] && board.CanMoveWithoutBreakingHive(piece))
-                    mobilePieces++;
+                    score += MobilityValueOf(type);          // type-weighted: formica libera vale di piu'
                 else
-                    pinnedPieces++;
+                    score -= PinWeightOf(type);              // type-weighted: formica pinnata e' molto grave
             }
             else
             {
@@ -349,8 +354,6 @@ static double ComputeColorScore(const Board& board, Color color, Color opponent,
         }
     }
 
-    score += W_MOBILE_PIECE * mobilePieces;
-    score += W_PINNED_OWN * pinnedPieces;
     score += W_BURIED_OWN * buriedPieces;
 
     // =========================================================================
@@ -359,7 +362,6 @@ static double ComputeColorScore(const Board& board, Color color, Color opponent,
     PieceName oppStart = (opponent == Color::White) ? PieceName::wQ : PieceName::bQ;
     PieceName oppEnd   = (opponent == Color::White) ? PieceName::wP : PieceName::bP;
 
-    int oppPinnedPieces = 0;
     int oppBuriedPieces = 0;
 
     for (uint8_t p = oppStart; p <= oppEnd; p++)
@@ -373,7 +375,7 @@ static double ComputeColorScore(const Board& board, Color color, Color opponent,
             if (board.PieceIsOnTop(piece))
             {
                 if (!board.cannotBeMoved[piece] && !board.CanMoveWithoutBreakingHive(piece))
-                    oppPinnedPieces++;
+                    score += PinWeightOf(GetBugType(piece));  // pinnare una formica avversaria vale molto
             }
             else
             {
@@ -382,7 +384,6 @@ static double ComputeColorScore(const Board& board, Color color, Color opponent,
         }
     }
 
-    score += W_PINNED_OPP * oppPinnedPieces;
     score += W_BURIED_OPP * oppBuriedPieces;
 
     // =========================================================================
