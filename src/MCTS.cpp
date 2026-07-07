@@ -1,14 +1,27 @@
 #include "MCTS.h"
 #include "Evaluation.h"
+#include "NeuralEvaluator.h"
 
 #include <cmath>
 #include <chrono>
 #include <algorithm>
 #include <limits>
 #include <cstring>
+#include <stdexcept>
 
 namespace HiveGotThis
 {
+
+namespace
+{
+    // Non posseduta: chi chiama SetValueNetwork resta proprietario dell'oggetto.
+    TorchScriptValueEvaluator* g_valueNetwork = nullptr;
+}
+
+void MCTS::SetValueNetwork(TorchScriptValueEvaluator* evaluator)
+{
+    g_valueNetwork = evaluator;
+}
 
 // =============================================================================
 // TRANSPOSITION TABLE
@@ -358,9 +371,11 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTab
         }
         else
         {
-            // L'euristica restituisce [0,1] dal punto di vista di chi muove: rimappa in [-1,1].
-            // Quando subentrera' la value network, restituira' gia' [-1,1] side-to-move e il 2v-1 sparisce.
-            value = 2.0 * EvaluateBoard(board, board.currentColor) - 1.0;
+            if (g_valueNetwork == nullptr)
+                throw std::runtime_error("MCTS: value network non impostata (chiamare SetValueNetwork prima di Search)");
+
+            // La value network restituisce gia' [-1,1] dal punto di vista di chi muove.
+            value = static_cast<double>(g_valueNetwork->EvaluateBoard(board));
             tt.Store(hash, value, static_cast<int16_t>(depth), node->isTerminal);
         }
     }

@@ -1,0 +1,9 @@
+# Versioni verificate per scripts/export_hive_value_gnn.py.
+#
+# torch_geometric >= 2.7 ha una regressione nello scripting di GATv2Conv:
+# torch.jit.script fallisce con "Could not cast value of type Optional[Tensor]
+# to bool" sulla riga `if return_attention_weights:` di gatv2_conv.py, anche
+# per un GATv2Conv istanziato da solo, fuori da questo progetto.
+# torch_geometric==2.6.1 non ha il problema.
+torch==2.5.1
+torch_geometric==2.6.1

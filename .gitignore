@@ -43,13 +43,19 @@
 # File system folder
 .DS_Store
 
+# Python
+__pycache__/
+*.pyc
+
+# Local libtorch install (downloaded, not committed)
+third_party/
+
 # Executable files
 build/
 
 # Files to obtain the test strings
 editMzingaMovesString
 editMzingaMovesString.cpp
-comandi_esecuzione.txt
 mosseDaEditare.txt
 TODO.txt
 

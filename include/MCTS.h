@@ -10,6 +10,8 @@
 namespace HiveGotThis
 {
 
+class TorchScriptValueEvaluator; // definita in NeuralEvaluator.h
+
 // =============================================================================
 // TRANSPOSITION TABLE
 // =============================================================================
@@ -88,6 +90,12 @@ class MCTS
 public:
     static Move Search(const Board& rootBoard, int timeLimitMs);
     static Move SearchIterations(const Board& rootBoard, int maxIterations);
+
+    // Deve essere impostata prima di chiamare Search/SearchIterations: l'MCTS
+    // valuta le foglie sempre con la value network, non esiste piu' un fallback
+    // euristico. Il chiamante mantiene la proprieta' dell'evaluator (nessun
+    // ownership qui).
+    static void SetValueNetwork(TorchScriptValueEvaluator* evaluator);
 
 private:
     // Iperparametri

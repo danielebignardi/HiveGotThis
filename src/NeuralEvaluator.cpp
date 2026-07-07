@@ -1,5 +1,7 @@
 #include "NeuralEvaluator.h"
 
+#include <torch/utils.h> // torch::set_num_threads (non incluso da torch/script.h)
+
 #include <stdexcept>
 
 namespace HiveGotThis
