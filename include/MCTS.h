@@ -97,6 +97,14 @@ public:
     // ownership qui).
     static void SetValueNetwork(TorchScriptValueEvaluator* evaluator);
 
+    // Statistiche di profiling sulle chiamate reali alla value network durante
+    // l'ultima ricerca (esclude le foglie servite dalla transposition table).
+    // Usate per benchmark (vedi tests/TestInferenceBenchmark.cpp), non nel
+    // normale funzionamento del motore.
+    static void ResetNetworkStats();
+    static double GetNetworkTimeMs();
+    static long GetNetworkCallCount();
+
 private:
     // Iperparametri
     static constexpr double EXPLORATION_C = 1.0;        // Peso dell'esplorazione in UCB1

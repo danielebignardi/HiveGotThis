@@ -16,11 +16,32 @@ namespace
 {
     // Non posseduta: chi chiama SetValueNetwork resta proprietario dell'oggetto.
     TorchScriptValueEvaluator* g_valueNetwork = nullptr;
+
+    // Profiling: tempo cumulativo e numero di chiamate reali alla rete
+    // (solo cache miss). Non usate nel normale funzionamento del motore.
+    double g_networkTimeMs = 0.0;
+    long   g_networkCallCount = 0;
 }
 
 void MCTS::SetValueNetwork(TorchScriptValueEvaluator* evaluator)
 {
     g_valueNetwork = evaluator;
+}
+
+void MCTS::ResetNetworkStats()
+{
+    g_networkTimeMs = 0.0;
+    g_networkCallCount = 0;
+}
+
+double MCTS::GetNetworkTimeMs()
+{
+    return g_networkTimeMs;
+}
+
+long MCTS::GetNetworkCallCount()
+{
+    return g_networkCallCount;
 }
 
 // =============================================================================
@@ -375,7 +396,12 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTab
                 throw std::runtime_error("MCTS: value network non impostata (chiamare SetValueNetwork prima di Search)");
 
             // La value network restituisce gia' [-1,1] dal punto di vista di chi muove.
+            auto netStart = std::chrono::steady_clock::now();
             value = static_cast<double>(g_valueNetwork->EvaluateBoard(board));
+            auto netEnd = std::chrono::steady_clock::now();
+            g_networkTimeMs += std::chrono::duration<double, std::milli>(netEnd - netStart).count();
+            ++g_networkCallCount;
+
             tt.Store(hash, value, static_cast<int16_t>(depth), node->isTerminal);
         }
     }

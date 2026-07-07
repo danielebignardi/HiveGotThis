@@ -34,6 +34,12 @@ int main(int argc, char** argv)
     }
 
     HiveGotThis::MCTS::SetValueNetwork(valueNetwork.get());
+
+    // I grafi di Hive sono piccoli (poche decine di nodi): il parallelismo
+    // interno di libtorch su piu' thread CPU costa piu' di quanto aiuti
+    // (misurato: ~3x piu' lento con i thread di default rispetto a 1 thread).
+    HiveGotThis::TorchScriptValueEvaluator::SetTorchThreads(1);
+
     std::cerr << "Value network caricata da: " << modelPath << std::endl;
 
     // Avvia l'engine: legge comandi da stdin e scrive risposte su stdout.
