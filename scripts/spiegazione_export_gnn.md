@@ -1,8 +1,10 @@
 # `export_hive_value_gnn.py`
 
-Esporta la value network `HiveValueGNN` (definita in questo stesso script) in un
-file TorchScript (`hive_value_gnn.pt`) che il motore C++ carica con libtorch
-tramite `TorchScriptValueEvaluator`. Vedi anche `docs/Hive_Python_Cpp_Interaction.md`
+Esporta la value network `HiveValueGNN` in un file TorchScript
+(`hive_value_gnn.pt`) che il motore C++ carica con libtorch tramite
+`TorchScriptValueEvaluator`. L'architettura del modello è definita in
+`hive_value_gnn.py`, modulo condiviso con lo script di training
+(`train_hive_value_gnn.py`): il modello è dichiarato in un posto solo. Vedi anche `docs/Hive_Python_Cpp_Interaction.md`
 per il quadro completo del ponte Python ↔ C++ e `docs/Hive_GNN_Spec.md` per il
 significato delle feature.
 
@@ -102,7 +104,8 @@ print(out)  # atteso: shape [B, 1], valori in [-1, 1]
   2 grafi solo per testare export e fidelity check, rispettando la stessa
   convenzione usata dal C++ per `edge_index` (prima tutte le sorgenti, poi
   tutte le destinazioni).
-- Se cambi l'architettura (`NODE_IN_DIM`, `EDGE_IN_DIM`, `GLOBAL_DIM`, o gli
-  iperparametri), ricordati che devono restare coerenti con `GNNNodeDim`,
-  `GNNEdgeDim`, `GNNGlobalDim` definiti in `include/BoardEncoder.h` lato C++:
-  non c'è un controllo automatico che li tenga sincronizzati.
+- Se cambi l'architettura (`NODE_IN_DIM`, `EDGE_IN_DIM`, `GLOBAL_DIM` in
+  `hive_value_gnn.py`, o gli iperparametri), ricordati che devono restare
+  coerenti con `GNNNodeDim`, `GNNEdgeDim`, `GNNGlobalDim` definiti in
+  `include/BoardEncoder.h` lato C++: non c'è un controllo automatico che li
+  tenga sincronizzati.

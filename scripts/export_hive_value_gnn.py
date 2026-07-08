@@ -10,7 +10,8 @@ Per testare subito l'integrazione C++ senza training:
     python scripts/export_hive_value_gnn.py --output hive_value_gnn.pt
 
 Lo script produce un file TorchScript autocontenuto che il C++ carica con
-libtorch tramite TorchScriptValueEvaluator.
+libtorch tramite TorchScriptValueEvaluator. L'architettura del modello e'
+definita in hive_value_gnn.py (condivisa con lo script di training).
 """
 
 from __future__ import annotations
@@ -19,102 +20,9 @@ import argparse
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
-from torch.nn import Dropout, LayerNorm, Linear, ReLU, Sequential, Tanh
-from torch_geometric.nn import GATv2Conv, global_max_pool, global_mean_pool
 
-
-NODE_IN_DIM = 18
-EDGE_IN_DIM = 9
-GLOBAL_DIM = 21
-
-
-class HiveValueGNN(torch.nn.Module):
-    """Value network descritta in Hive_GNN_Spec.md.
-
-    Input:
-        x:          [N, 18] float32
-        edge_index: [2, E]  int64
-        edge_attr:  [E, 9]  float32
-        u:          [B, 21] float32
-        batch:      [N]     int64
-
-    Output:
-        value:      [B, 1]  float32 in [-1, 1]
-    """
-
-    def __init__(
-        self,
-        node_in_dim: int = NODE_IN_DIM,
-        edge_in_dim: int = EDGE_IN_DIM,
-        u_dim: int = GLOBAL_DIM,
-        hidden_dim: int = 64,
-        heads: int = 4,
-        dropout_p: float = 0.2,
-    ) -> None:
-        super().__init__()
-
-        self.conv1 = GATv2Conv(
-            node_in_dim,
-            hidden_dim,
-            edge_dim=edge_in_dim,
-            heads=heads,
-            concat=False,
-            add_self_loops=False,
-        )
-        self.norm1 = LayerNorm(hidden_dim)
-
-        self.conv2 = GATv2Conv(
-            hidden_dim,
-            hidden_dim,
-            edge_dim=edge_in_dim,
-            heads=heads,
-            concat=False,
-            add_self_loops=False,
-        )
-        self.norm2 = LayerNorm(hidden_dim)
-
-        self.conv3 = GATv2Conv(
-            hidden_dim,
-            hidden_dim,
-            edge_dim=edge_in_dim,
-            heads=heads,
-            concat=False,
-            add_self_loops=False,
-        )
-        self.norm3 = LayerNorm(hidden_dim)
-
-        self.value_head = Sequential(
-            Linear(2 * hidden_dim + u_dim, 32),
-            LayerNorm(32),
-            ReLU(),
-            Dropout(p=dropout_p),
-            Linear(32, 1),
-            Tanh(),
-        )
-
-    def forward(
-        self,
-        x: Tensor,
-        edge_index: Tensor,
-        edge_attr: Tensor,
-        u: Tensor,
-        batch: Tensor,
-    ) -> Tensor:
-        x = F.elu(self.norm1(self.conv1(x, edge_index, edge_attr)))
-        x = F.elu(self.norm2(self.conv2(x, edge_index, edge_attr)))
-        x = F.elu(self.norm3(self.conv3(x, edge_index, edge_attr)))
-
-        pooled = torch.cat(
-            [
-                global_mean_pool(x, batch),
-                global_max_pool(x, batch),
-                u,
-            ],
-            dim=1,
-        )
-        return self.value_head(pooled)
+from hive_value_gnn import EDGE_IN_DIM, GLOBAL_DIM, NODE_IN_DIM, HiveValueGNN, load_weights
 
 
 def make_dummy_batch(device: torch.device) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -150,15 +58,6 @@ def make_dummy_batch(device: torch.device) -> tuple[Tensor, Tensor, Tensor, Tens
     batch = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int64, device=device)
 
     return x, edge_index, edge_attr, u, batch
-
-
-def load_weights(model: torch.nn.Module, weights_path: Path, device: torch.device) -> None:
-    checkpoint = torch.load(weights_path, map_location=device)
-
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        checkpoint = checkpoint["model_state_dict"]
-
-    model.load_state_dict(checkpoint)
 
 
 def export_model(args: argparse.Namespace) -> None:
