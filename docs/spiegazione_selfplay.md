@@ -1,7 +1,7 @@
 # Self-play: generazione dati di training (`src/selfplay_main.cpp`)
 
-L'eseguibile `SelfPlay` fa giocare il motore contro se stesso per **una
-partita** e salva su file, riga per riga, tutte le posizioni incontrate
+L'eseguibile `SelfPlay` fa giocare il motore contro se stesso per una o più
+partite e salva su file, riga per riga, tutte le posizioni incontrate
 insieme all'esito finale. Questi file sono il dataset con cui, in Python, si
 addestra la value network a valutare una board.
 
@@ -18,7 +18,7 @@ aggiunta in seguito.
 ## Come si usa
 
 ```bash
-./build/SelfPlay <model.pt> <output.jsonl> [iterazioni] [maxPly] [seed] [plyAperturaCasuale] [game_id]
+./build/SelfPlay <model.pt> <output.jsonl> [iterazioni] [maxPly] [seed] [plyAperturaCasuale] [game_id] [numPartite]
 ```
 
 | Argomento            | Default        | Significato                                                        |
@@ -27,21 +27,27 @@ aggiunta in seguito.
 | `output.jsonl`       | (obbligatorio) | File di output; le righe vengono **aggiunte in coda** (append)      |
 | `iterazioni`         | 400            | Iterazioni MCTS per ogni mossa (non tempo: riproducibile)           |
 | `maxPly`             | 200            | Tetto di mosse: oltre, la partita viene troncata                    |
-| `seed`               | casuale        | Seed del generatore casuale (stampato a fine partita, per riprodurla) |
+| `seed`               | casuale        | Seed base del generatore casuale (stampato per ogni partita)        |
 | `plyAperturaCasuale` | 6              | Numero di mosse iniziali scelte a caso invece che con MCTS          |
-| `game_id`            | 0              | Identificativo della partita, riportato in ogni riga dell'output    |
+| `game_id`            | 0              | Identificativo base delle partite, riportato in ogni riga dell'output |
+| `numPartite`         | 1              | Quante partite giocare in questa esecuzione                         |
 
-Esempio: generare un piccolo dataset di 20 partite in un unico file, con
-seed e `game_id` diversi per ognuna:
+La partita i-esima del lotto usa `seed+i` e `game_id+i`: ogni singola partita
+resta quindi riproducibile da sola, rilanciando con `numPartite=1` e i valori
+corrispondenti. Giocare più partite nello stesso processo evita di ricaricare
+il modello ogni volta e **mantiene calda la transposition table** tra una
+partita e l'altra (partite successive condividono molte posizioni, e in
+self-play riusare la cache è corretto: i valori dipendono solo da board e
+pesi della rete).
+
+Esempio: generare un dataset di 20 partite in un unico file:
 
 ```bash
-for seed in $(seq 1 20); do
-    ./build/SelfPlay hive_value_gnn.pt data/partite.jsonl 400 200 $seed 6 $seed
-done
+./build/SelfPlay hive_value_gnn.pt data/partite.jsonl 400 200 1 6 0 20
 ```
 
-A fine partita l'eseguibile stampa su stderr un riepilogo: esito, numero di
-ply, seed usato e quante posizioni sono state scritte.
+A fine di ogni partita l'eseguibile stampa su stderr un riepilogo: esito,
+numero di ply, seed usato e quante posizioni sono state scritte.
 
 ## Formato dell'output
 
@@ -113,10 +119,11 @@ dalla ricerca del Nero. La transposition table persistente di MCTS (vedi
 
 ## Limiti noti di questa versione (scelte deliberate)
 
-- **Una partita per esecuzione, nessun parallelismo.** Prima si valida il
-  ciclo end-to-end; se la velocità di generazione diventa il collo di
-  bottiglia, la strada prevista è parallelizzare le *partite* (processi
-  indipendenti, come nel ciclo bash qui sopra), non la singola ricerca MCTS.
+- **Nessun parallelismo.** Prima si valida il ciclo end-to-end; se la
+  velocità di generazione diventa il collo di bottiglia, la strada prevista è
+  lanciare più processi `SelfPlay` in parallelo (ognuno col suo blocco di
+  seed/`game_id` e il suo file di output), non parallelizzare la singola
+  ricerca MCTS.
 - **Con la rete non ancora addestrata quasi tutte le partite finiscono in
   patta** per la regola della configurazione ripetuta (i pezzi oscillano
   avanti e indietro) o al tetto di mosse: tutte le posizioni ricevono `z=0` e
