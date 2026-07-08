@@ -28,6 +28,10 @@ set_property(TARGET hive_core PROPERTY CXX_STANDARD 17)
 add_executable(HiveEngine src/main.cpp)
 target_link_libraries(HiveEngine hive_core)
 
+# Generatore di dati self-play (una partita per esecuzione, output JSONL)
+add_executable(SelfPlay src/selfplay_main.cpp)
+target_link_libraries(SelfPlay hive_core)
+
 # Test (escluso TestMoves: usa API Unix non disponibili su Windows)
 foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestIsPinned TestEncoderShapes TestEdgeAlignment TestPerft TestPerftMidgame TestTournamentBenchmark TestMoves)
     add_executable(${test} tests/${test}.cpp)
