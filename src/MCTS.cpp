@@ -8,6 +8,7 @@
 #include <limits>
 #include <cstring>
 #include <stdexcept>
+#include <memory>
 
 namespace HiveGotThis
 {
@@ -21,6 +22,21 @@ namespace
     // (solo cache miss). Non usate nel normale funzionamento del motore.
     double g_networkTimeMs = 0.0;
     long   g_networkCallCount = 0;
+
+    // Profiling: numero totale di iterazioni MCTS eseguite (cache hit + miss).
+    long g_iterationCount = 0;
+
+    // Transposition table persistente per tutta la durata del processo: le
+    // entry sono valutazioni pure della value network per una board, valide
+    // finche' i pesi della rete non cambiano (caricati una volta sola in
+    // main.cpp) - quindi e' sicuro riusarle tra chiamate di Search/SearchIterations
+    // diverse (turni diversi, anche partite diverse nello stesso processo).
+    std::unique_ptr<TranspositionTable> g_tt;
+
+    // Con la tabella persistente l'allocazione avviene una sola volta per
+    // processo (non piu' ad ogni Search), quindi possiamo permetterci una
+    // tabella piu' grande della vecchia 2^18 per-chiamata.
+    constexpr size_t PERSISTENT_TT_SIZE_POWER2 = 21; // ~2.1M entries, ~48 MB
 }
 
 void MCTS::SetValueNetwork(TorchScriptValueEvaluator* evaluator)
@@ -32,6 +48,7 @@ void MCTS::ResetNetworkStats()
 {
     g_networkTimeMs = 0.0;
     g_networkCallCount = 0;
+    g_iterationCount = 0;
 }
 
 double MCTS::GetNetworkTimeMs()
@@ -42,6 +59,24 @@ double MCTS::GetNetworkTimeMs()
 long MCTS::GetNetworkCallCount()
 {
     return g_networkCallCount;
+}
+
+long MCTS::GetIterationCount()
+{
+    return g_iterationCount;
+}
+
+TranspositionTable& MCTS::GetPersistentTranspositionTable()
+{
+    if (!g_tt)
+        g_tt = std::make_unique<TranspositionTable>(PERSISTENT_TT_SIZE_POWER2);
+    return *g_tt;
+}
+
+void MCTS::ClearTranspositionTable()
+{
+    if (g_tt)
+        g_tt->Clear();
 }
 
 // =============================================================================
@@ -266,6 +301,8 @@ void MCTS::TrySolve(MCTSNode* node)
 // nodo (+1 = chi muove vince, -1 = perde, 0 = patta); il segno si inverte ad ogni livello in backup.
 void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTable& tt)
 {
+    ++g_iterationCount;
+
     // === SELEZIONE ===
     // Scende nell'albero seguendo UCB1 fino a un nodo da espandere, terminale, o provato.
     MCTSNode* node = root;
@@ -511,7 +548,7 @@ Move MCTS::Search(const Board& rootBoard, int timeLimitMs)
 
     MCTSNode root(PassMove, nullptr);
     root.visitCount = 1;
-    TranspositionTable tt(18);
+    TranspositionTable& tt = GetPersistentTranspositionTable();
 
     auto startTime = std::chrono::steady_clock::now();
     auto endTime   = startTime + std::chrono::milliseconds(timeLimitMs);
@@ -555,7 +592,7 @@ Move MCTS::SearchIterations(const Board& rootBoard, int maxIterations)
 
     MCTSNode root(PassMove, nullptr);
     root.visitCount = 1;
-    TranspositionTable tt(18);
+    TranspositionTable& tt = GetPersistentTranspositionTable();
 
     for (int i = 0; i < maxIterations; i++)
     {

@@ -8,11 +8,15 @@
 #include "Board.h"
 #include "Engine.h"
 #include "Enums.h"
+#include "MCTS.h"
 #include "Move.h"
+#include "NeuralEvaluator.h"
 #include "Position.h"
 #include "Constants.h"
 
+#include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -25,6 +29,12 @@ using namespace HiveGotThis;
 
 static int g_passed = 0;
 static int g_failed = 0;
+
+// NeuralEvaluator.h include libtorch, che definisce una propria macro CHECK
+// (c10/util/Logging.h) - la togliamo di mezzo prima di definire la nostra.
+#ifdef CHECK
+#undef CHECK
+#endif
 
 #define CHECK(desc, condition)                                              \
     do {                                                                    \
@@ -636,13 +646,37 @@ void TestRobustness()
 // =============================================================================
 // MAIN
 // =============================================================================
-int main()
+int main(int argc, char** argv)
 {
     std::cout << "╔══════════════════════════════════════════╗\n";
     std::cout << "║   HiveGotThis - Test Suite Engine        ║\n";
     std::cout << "╚══════════════════════════════════════════╝\n";
 
     Board::InitializeZobristTable();
+
+    // Engine::CommandBestMove chiama MCTS::Search/SearchIterations, che dal
+    // refactor "rete obbligatoria" richiedono sempre una value network
+    // impostata (nessun fallback euristico) - stesso requisito di main.cpp.
+    const char* modelPath = argc > 1 ? argv[1] : std::getenv("HIVE_VALUE_NETWORK");
+    if (modelPath == nullptr)
+    {
+        std::cerr << "Errore: serve il path della value network per TestEngine "
+                   << "(argomento da riga di comando oppure variabile HIVE_VALUE_NETWORK).\n";
+        return 1;
+    }
+
+    std::unique_ptr<TorchScriptValueEvaluator> valueNetwork;
+    try
+    {
+        valueNetwork = std::make_unique<TorchScriptValueEvaluator>(modelPath);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "Errore caricando la value network (" << modelPath << "): " << e.what() << "\n";
+        return 1;
+    }
+    MCTS::SetValueNetwork(valueNetwork.get());
+    TorchScriptValueEvaluator::SetTorchThreads(1);
 
     TestInfo();
     TestNewGame();
