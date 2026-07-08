@@ -36,7 +36,7 @@ namespace HiveGotThis
 //     batch      int64   [sumN]
 //
 // Il valore restituito e' assunto in [-1, 1] e dal punto di vista del giocatore
-// che deve muovere, come descritto in Hive_Python_Cpp_Interaction.md.
+// che deve muovere, come descritto in docs/spiegazione_value_network.md.
 class TorchScriptValueEvaluator
 {
 public:
