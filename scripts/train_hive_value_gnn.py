@@ -10,8 +10,16 @@ poi si esporta il modello per il C++ con lo script gia' esistente:
 
     python3 scripts/export_hive_value_gnn.py --weights checkpoint.pt --output hive_value_gnn.pt
 
+Per il ciclo a generazioni, --init-weights fa partire il training dai pesi
+della rete precedente invece che da pesi casuali (vengono caricati solo i
+pesi del modello, l'optimizer riparte fresco):
+
+    python3 scripts/train_hive_value_gnn.py data/nuove.jsonl \
+        --init-weights checkpoint_gen0.pt --output checkpoint_gen1.pt
+
 NB: se si cambiano --hidden-dim/--heads rispetto ai default, vanno passati
-uguali anche all'export, altrimenti load_state_dict fallisce.
+uguali anche all'export e alle generazioni successive, altrimenti
+load_state_dict fallisce.
 
 Ogni riga del JSONL e' una posizione: feature del grafo (x, edge_index,
 edge_attr, u) gia' encodate dal C++ e label z in {-1, 0, +1} (esito finale
@@ -34,7 +42,7 @@ import torch
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-from hive_value_gnn import EDGE_IN_DIM, GLOBAL_DIM, NODE_IN_DIM, HiveValueGNN
+from hive_value_gnn import EDGE_IN_DIM, GLOBAL_DIM, NODE_IN_DIM, HiveValueGNN, load_weights
 
 
 def record_to_data(rec: dict) -> Data:
@@ -120,6 +128,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train HiveValueGNN su dataset JSONL")
     parser.add_argument("data", nargs="+", help="Uno o piu' file JSONL prodotti da SelfPlay")
     parser.add_argument("--output", type=str, default="checkpoint.pt", help="Checkpoint dei pesi (il migliore su validation)")
+    parser.add_argument("--init-weights", type=str, default=None,
+                        help="Checkpoint da cui partire (pesi della generazione precedente) invece dei pesi casuali")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -152,6 +162,15 @@ def main() -> None:
         heads=args.heads,
         dropout_p=args.dropout,
     ).to(device)
+
+    # Ciclo a generazioni: si parte dai pesi della rete precedente invece che
+    # da pesi casuali. Solo i pesi del modello: l'optimizer riparte fresco,
+    # perche' i dati nuovi hanno una distribuzione diversa da quelli su cui i
+    # suoi momenti interni erano stati accumulati.
+    if args.init_weights is not None:
+        load_weights(model, Path(args.init_weights), device)
+        print(f"Pesi iniziali caricati da: {args.init_weights}")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     best_val = float("inf")

@@ -166,6 +166,7 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
 
 ```bash
 python3 scripts/train_hive_value_gnn.py data/*.jsonl --output checkpoint.pt \
+    [--init-weights checkpoint_prec.pt] \
     [--epochs 20] [--batch-size 64] [--lr 1e-3] [--val-fraction 0.1] \
     [--hidden-dim 64] [--heads 4] [--dropout 0.2] [--device cpu] [--seed 42]
 ```
@@ -173,6 +174,16 @@ python3 scripts/train_hive_value_gnn.py data/*.jsonl --output checkpoint.pt \
 Accetta più file JSONL insieme (self-play + future partite umane: stesso
 formato, il training non distingue la provenienza). Per ogni epoca stampa la
 MSE di training e, sulla validation, MSE e "segno-ok".
+
+Con `--init-weights` il training parte dai pesi di un checkpoint precedente
+invece che da pesi casuali: è il meccanismo del **ciclo a generazioni**
+(`gen0` da partite umane → self-play → training con `--init-weights gen0` →
+`gen1` → ...). Vengono caricati solo i pesi del modello, mentre l'optimizer
+riparte fresco: i suoi momenti interni erano accumulati su dati con una
+distribuzione diversa da quelli nuovi. (Il caso diverso — riprendere un
+training *interrotto a metà*, che richiederebbe anche lo stato
+dell'optimizer e l'epoca corrente — non è supportato: i nostri training
+sono corti.)
 
 ### Le scelte che contano
 
@@ -207,6 +218,16 @@ gli stessi valori all'export, altrimenti `load_state_dict` fallisce per
 shape mismatch.
 
 ## 5. Export: `export_hive_value_gnn.py`
+
+Perché due file separati (checkpoint del training e file esportato)? Sono
+artefatti diversi con scopi diversi, anche se entrambi finiscono in `.pt`:
+il **checkpoint** contiene solo i pesi in formato PyTorch nativo ed è il
+"sorgente" — da lì si riprende il training (`--init-weights`) o si
+ri-esporta; il **file TorchScript** è il modello *compilato* per libtorch,
+il "binario" — dalla compilazione non si torna indietro (non si può
+riprendere il training da un TorchScript). Il training salva il checkpoint
+molte volte durante un run; l'export si fa una volta sola, quando si decide
+che quel modello va dato al motore.
 
 ```bash
 # con pesi addestrati
