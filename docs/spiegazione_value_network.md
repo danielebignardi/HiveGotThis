@@ -238,9 +238,16 @@ python3 scripts/train_hive_value_gnn.py data/*.jsonl --output checkpoint.pt \
     [--hidden-dim 64] [--heads 4] [--dropout 0.2] [--device cpu] [--seed 42]
 ```
 
-Accetta più file JSONL insieme (self-play + future partite umane: stesso
-formato, il training non distingue la provenienza). Per ogni epoca stampa la
-MSE di training e, sulla validation, MSE e "segno-ok".
+Accetta più file JSONL insieme (self-play + partite umane: stesso formato,
+il training non distingue la provenienza). Per ogni epoca stampa la MSE di
+training e, sulla validation, MSE e "segno-ok".
+
+**Training su GPU con Colab**: `scripts/train_colab.ipynb` è un notebook
+pronto — si carica su Drive una cartella con i due script Python e lo zip
+dei JSONL, e il checkpoint viene salvato direttamente su Drive (a prova di
+disconnessione). Su Colab si fa **solo il training**: l'export TorchScript
+resta in locale, dove vive l'ambiente con `torch_geometric==2.6.1` (è il
+motivo per cui checkpoint ed export sono due passi separati).
 
 Con `--init-weights` il training parte dai pesi di un checkpoint precedente
 invece che da pesi casuali: è il meccanismo del **ciclo a generazioni**
