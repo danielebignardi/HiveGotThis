@@ -180,17 +180,20 @@ solo 2025: 2.194 partite plm → 2.164 convertite (98,6%), ~115.000 posizioni
 con label vere e ben bilanciate tra vittorie del Bianco e del Nero.
 
 ```bash
-# scarica un anno (una tantum; gentile col server: una richiesta ogni 0.4s)
-mkdir -p data/boardspace/2025 && cd data/boardspace/2025
-curl -s "https://www.boardspace.net/hive/hivegames/archive-2025/" \
-  | grep -o 'href="games-[^"]*\.zip"' | sed 's/href="//;s/"//' \
-  | while read z; do curl -sO "https://www.boardspace.net/hive/hivegames/archive-2025/$z"; sleep 0.4; done
-cd -
+# scarica E converte un intervallo di anni (riavviabile: salta quanto gia' fatto)
+scripts/download_boardspace.sh 2010 2025
 
-# converte (legge gli zip direttamente, senza scompattarli)
+# solo conversione, per una cartella di zip qualsiasi:
 python3 scripts/boardspace_to_jsonl.py data/boardspace/2025 \
     --output data/boardspace_2025.jsonl --model hive_value_gnn.pt
 ```
+
+`download_boardspace.sh` scarica gli zip in `data/boardspace/<anno>/` (una
+richiesta ogni 0.4s per gentilezza verso il server, con retry sugli errori
+di rete) e produce un `data/boardspace_<anno>.jsonl` per anno; il dettaglio
+delle partite scartate finisce in `data/boardspace/<anno>/conversione.log`.
+Prima del ~2010 la variante `hive-plm` non esiste: quegli anni producono
+file vuoti, innocui per il training.
 
 ### Come funziona
 
