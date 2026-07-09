@@ -12,7 +12,7 @@ formato prodotto da SelfPlay:
 
 Uso tipico (gli zip scaricati da archive-YYYY/ possono stare in una cartella):
 
-    python3 scripts/boardspace_to_jsonl.py data/boardspace/zips \
+    python3 scripts/boardspace/boardspace_to_jsonl.py data/boardspace/zips \
         --output data/boardspace_2025.jsonl
 
 Perche' il replay nell'engine invece di parsare le mosse in Python:

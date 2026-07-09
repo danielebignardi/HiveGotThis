@@ -8,7 +8,7 @@
 # duplicherebbe le partite).
 #
 # Uso:
-#   scripts/download_boardspace.sh [primo_anno] [ultimo_anno]   # default: 2006 2026
+#   scripts/boardspace/download_boardspace.sh [primo_anno] [ultimo_anno]   # default: 2006 2026
 #
 # Requisiti: build/HiveEngine compilato e un modello .pt qualsiasi per
 # avviarlo (variabile HIVE_VALUE_NETWORK oppure hive_value_gnn.pt nella
@@ -20,7 +20,7 @@
 #   data/boardspace/<anno>/conversione.log   il dettaglio delle partite scartate
 
 set -euo pipefail
-cd "$(dirname "$0")/.."   # lavora sempre dalla radice del progetto
+cd "$(dirname "$0")/../.."   # lavora sempre dalla radice del progetto
 
 BASE_URL="https://www.boardspace.net/hive/hivegames"
 FIRST_YEAR="${1:-2006}"
@@ -79,7 +79,7 @@ for year in $(seq "$FIRST_YEAR" "$LAST_YEAR"); do
     echo "=== $year: conversione ==="
     # game_id distinti per anno (anno*10000): non indispensabile (il training
     # distingue le partite per coppia file+id) ma comodo per il debugging.
-    python3 scripts/boardspace_to_jsonl.py "$dir" \
+    python3 scripts/boardspace/boardspace_to_jsonl.py "$dir" \
         --output "$jsonl" \
         --model "$MODEL" \
         --game-id-start $((year * 10000)) \

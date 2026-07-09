@@ -62,12 +62,20 @@ def record_to_data(rec: dict) -> Data:
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, u=u, y=y)
 
 
-def load_games(paths: list[str]) -> dict:
+def load_games(paths: list[str], sample: float, seed: int) -> dict:
     """Legge i JSONL e raggruppa le posizioni per partita.
 
     La chiave e' (file, game_id): il game_id da solo non basta, perche' file
     diversi possono riusare gli stessi id.
+
+    Con sample < 1 tiene solo quella frazione di posizioni, scelte a caso
+    (deterministicamente, dato il seed). Serve quando il dataset intero non
+    sta in RAM: le posizioni della stessa partita sono quasi-duplicate,
+    quindi sottocampionare DENTRO le partite perde poca informazione e
+    preserva la diversita' (tutte le partite restano rappresentate) —
+    meglio che scartare interi anni.
     """
+    rng = random.Random(seed)
     games: dict = defaultdict(list)
     for path in paths:
         n_rows = 0
@@ -75,6 +83,8 @@ def load_games(paths: list[str]) -> dict:
             for line_no, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
+                    continue
+                if sample < 1.0 and rng.random() >= sample:
                     continue
                 try:
                     rec = json.loads(line)
@@ -140,6 +150,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Frazione di PARTITE (non posizioni) per la validation")
+    parser.add_argument("--sample", type=float, default=1.0,
+                        help="Frazione di posizioni da caricare (es. 0.4 se il dataset intero non sta in RAM)")
     parser.add_argument("--hidden-dim", type=int, default=64, help="Deve combaciare con l'export")
     parser.add_argument("--heads", type=int, default=4, help="Deve combaciare con l'export")
     parser.add_argument("--dropout", type=float, default=0.2)
@@ -150,7 +162,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
-    games = load_games(args.data)
+    games = load_games(args.data, args.sample, args.seed)
     if not games:
         print("Nessuna posizione trovata nei file dati.", file=sys.stderr)
         sys.exit(1)

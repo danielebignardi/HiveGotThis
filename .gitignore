@@ -53,6 +53,9 @@ third_party/
 # Dataset locali (partite scaricate/generate e JSONL: grandi e rigenerabili)
 data/
 
+# Modello locale nella radice (ognuno esporta il proprio)
+/hive_value_gnn.pt
+
 # Executable files
 build/
 

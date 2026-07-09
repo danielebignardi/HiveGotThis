@@ -59,8 +59,8 @@ python3 scripts/export_hive_value_gnn.py --weights checkpoint.pt --output hive_v
 | `scripts/train_hive_value_gnn.py` | Training sui dataset JSONL |
 | `scripts/train_colab.ipynb` | Notebook per il training su GPU (Colab) |
 | `scripts/export_hive_value_gnn.py` | Export TorchScript + fidelity check |
-| `scripts/boardspace_to_jsonl.py` | Converte partite umane BoardSpace in JSONL |
-| `scripts/download_boardspace.sh` | Scarica l'archivio BoardSpace e lancia la conversione |
+| `scripts/boardspace/boardspace_to_jsonl.py` | Converte partite umane BoardSpace in JSONL |
+| `scripts/boardspace/download_boardspace.sh` | Scarica l'archivio BoardSpace e lancia la conversione |
 | `src/selfplay_main.cpp` (`SelfPlay`) | Generazione dati di self-play |
 | `src/BoardEncoder.cpp` | L'encoder board → grafo (unico, C++) |
 | `src/NeuralEvaluator.cpp` | Caricamento del `.pt` e inferenza in C++ |
@@ -192,10 +192,10 @@ pre-revisione delle regole, che l'engine attuale giustamente rifiuta).
 
 ```bash
 # scarica E converte un intervallo di anni (riavviabile: salta quanto gia' fatto)
-scripts/download_boardspace.sh 2013 2026
+scripts/boardspace/download_boardspace.sh 2013 2026
 
 # solo conversione, per una cartella di zip qualsiasi:
-python3 scripts/boardspace_to_jsonl.py data/boardspace/2025 \
+python3 scripts/boardspace/boardspace_to_jsonl.py data/boardspace/2025 \
     --output data/boardspace_2025.jsonl --model hive_value_gnn.pt
 ```
 
@@ -274,7 +274,7 @@ tenute: chi abbandona di solito stava perdendo davvero.
 
 ```bash
 python3 scripts/train_hive_value_gnn.py data/*.jsonl --output checkpoint.pt \
-    [--init-weights checkpoint_prec.pt] \
+    [--init-weights checkpoint_prec.pt] [--sample 1.0] \
     [--epochs 20] [--batch-size 64] [--lr 1e-3] [--val-fraction 0.1] \
     [--hidden-dim 64] [--heads 4] [--dropout 0.2] [--device cpu] [--seed 42]
 ```
@@ -282,6 +282,14 @@ python3 scripts/train_hive_value_gnn.py data/*.jsonl --output checkpoint.pt \
 Accetta più file JSONL insieme (self-play + partite umane: stesso formato,
 il training non distingue la provenienza). Per ogni epoca stampa la MSE di
 training e, sulla validation, MSE e "segno-ok".
+
+Il dataset viene caricato **tutto in RAM** (~13 KB a posizione: il dataset
+BoardSpace completo richiede più dei ~12 GB del Colab gratuito e il
+processo viene ucciso durante il caricamento). Il rimedio è `--sample`:
+tiene solo quella frazione di posizioni, scelte a caso dentro ogni partita
+— essendo quasi-duplicate tra loro se ne perde poca informazione, e tutte
+le partite di tutti gli anni restano rappresentate (meglio che scartare
+interi anni).
 
 **Training su GPU con Colab**: si fa con `scripts/train_colab.ipynb`. Il
 notebook legge dalla cartella Drive condivisa del progetto
