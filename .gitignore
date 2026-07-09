@@ -50,6 +50,9 @@ __pycache__/
 # Local libtorch install (downloaded, not committed)
 third_party/
 
+# Dataset locali (partite scaricate/generate e JSONL: grandi e rigenerabili)
+data/
+
 # Executable files
 build/
 

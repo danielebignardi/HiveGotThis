@@ -1,9 +1,9 @@
-# La value network: pipeline completa (self-play → training → export → motore)
+# La value network: pipeline completa (dati → training → export → motore)
 
 Questo documento spiega tutta la parte del progetto che riguarda la rete
 neurale di valutazione: come è fatta, come si generano i dati per
-addestrarla, come si addestra, come si esporta per il C++ e come il motore
-la usa in partita. Per il significato delle singole feature (cosa c'è dentro
+addestrarla (self-play e partite umane), come si addestra, come si esporta
+per il C++ e come il motore la usa in partita. Per il significato delle singole feature (cosa c'è dentro
 `x`, `edge_attr`, `u`) vedi `Hive_GNN_Spec.md`; per compilare ed eseguire
 vedi `guida_compilazione/Come_Compilare_Ed_Eseguire.md`.
 
@@ -33,7 +33,7 @@ non è mai stata riscritta in Python. Per l'inferenza l'encoder gira dentro
 MCTS; per il training il C++ serializza *gli stessi identici array* su file,
 e Python li legge senza ricostruire nessuna board. Conseguenza: non esiste
 un problema di "parità" tra due encoder, perché l'encoder è uno solo. La
-validazione che conta è invece la **fedeltà dell'export** (§5).
+validazione che conta è invece la **fedeltà dell'export** (§6).
 
 ### Il ciclo in pratica (i 4 comandi)
 
@@ -58,6 +58,7 @@ python3 scripts/export_hive_value_gnn.py --weights checkpoint.pt --output hive_v
 | `scripts/hive_value_gnn.py` | Definizione del modello (unica, condivisa) |
 | `scripts/train_hive_value_gnn.py` | Training sui dataset JSONL |
 | `scripts/export_hive_value_gnn.py` | Export TorchScript + fidelity check |
+| `scripts/boardspace_to_jsonl.py` | Converte partite umane BoardSpace in JSONL |
 | `src/selfplay_main.cpp` (`SelfPlay`) | Generazione dati di self-play |
 | `src/BoardEncoder.cpp` | L'encoder board → grafo (unico, C++) |
 | `src/NeuralEvaluator.cpp` | Caricamento del `.pt` e inferenza in C++ |
@@ -162,7 +163,70 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
   la strada è lanciare più processi `SelfPlay` (ognuno col suo blocco di
   seed/`game_id` e il suo file), non parallelizzare la singola ricerca MCTS.
 
-## 4. Training: `train_hive_value_gnn.py`
+## 4. Bootstrap da partite umane: `boardspace_to_jsonl.py`
+
+Una rete a pesi casuali gioca partite di self-play senza senso che quasi mai
+finiscono: poco segnale per imparare. Il bootstrap parte quindi da **partite
+umane vere**, convertite nello stesso identico formato JSONL del `SelfPlay`,
+così il training non distingue nemmeno da dove vengono i dati.
+
+### La fonte: l'archivio BoardSpace
+
+<https://www.boardspace.net/hive/hivegames/> contiene le partite giocate
+online dal 2006 a oggi, una cartella `archive-ANNO/` per anno, dentro zip
+periodici (`games-Gen-2-2025.zip`, ...). Ordine di grandezza: ~5.000 partite
+l'anno, di cui ~40% della variante `hive-plm` = il nostro **Base+MLP**. Il
+solo 2025: 2.194 partite plm → 2.164 convertite (98,6%), ~115.000 posizioni
+con label vere e ben bilanciate tra vittorie del Bianco e del Nero.
+
+```bash
+# scarica un anno (una tantum; gentile col server: una richiesta ogni 0.4s)
+mkdir -p data/boardspace/2025 && cd data/boardspace/2025
+curl -s "https://www.boardspace.net/hive/hivegames/archive-2025/" \
+  | grep -o 'href="games-[^"]*\.zip"' | sed 's/href="//;s/"//' \
+  | while read z; do curl -sO "https://www.boardspace.net/hive/hivegames/archive-2025/$z"; sleep 0.4; done
+cd -
+
+# converte (legge gli zip direttamente, senza scompattarli)
+python3 scripts/boardspace_to_jsonl.py data/boardspace/2025 \
+    --output data/boardspace_2025.jsonl --model hive_value_gnn.pt
+```
+
+### Come funziona
+
+I file sono SGF nel dialetto BoardSpace; l'ultimo campo di ogni mossa è già
+quasi-notazione UHP. Lo script:
+
+1. **parsa** ogni SGF (variante, giocatori, referto, mosse) e **traduce** le
+   mosse in UHP — le sottigliezze del formato scoperte sui dati veri
+   (turni confermati dal `Done`, ripensamenti, pass impliciti, riferimenti
+   omessi) sono documentate nel docstring dello script;
+2. **rigioca** ogni partita dentro `HiveEngine` (un solo processo riusato):
+   dopo ogni mossa manda `features`, il comando UHP che stampa il grafo
+   della posizione encodato da `BoardEncoder` — **lo stesso encoder del
+   self-play**, zero rischio di incoerenze. Il replay è anche il
+   validatore: una mossa intraducibile viene rifiutata dall'engine e la
+   partita scartata (con log);
+3. assegna il **label z** con doppio controllo: se il replay raggiunge uno
+   stato terminale fa fede il verdetto dell'engine; altrimenti (abbandoni,
+   timeout) si usa il referto `RE[...]`, cercando il **nome** del vincitore
+   nel testo (il referto è localizzato nella lingua del client: polacco,
+   cinese, ...). Se i due verdetti esistono e non concordano, la partita
+   viene scartata: potrebbe essere una traduzione silenziosamente sbagliata.
+
+Opzioni utili: `--variant` (default `hive-plm`), `--min-plies` (default 8,
+scarta partite lampo), `--game-id-start` per accodare più conversioni allo
+stesso file senza collisioni di `game_id` (il training comunque distingue le
+partite per coppia file+id).
+
+### Cosa NON filtra
+
+Le partite contro i bot di BoardSpace (Dumbot/WeakBot/...) sono la
+maggioranza e vengono **tenute**: per una value network conta l'esito della
+partita, non l'eleganza delle mosse. Anche le vittorie per abbandono sono
+tenute: chi abbandona di solito stava perdendo davvero.
+
+## 5. Training: `train_hive_value_gnn.py`
 
 ```bash
 python3 scripts/train_hive_value_gnn.py data/*.jsonl --output checkpoint.pt \
@@ -217,7 +281,7 @@ Attenzione: se cambi `--hidden-dim` o `--heads` in training, devi passare
 gli stessi valori all'export, altrimenti `load_state_dict` fallisce per
 shape mismatch.
 
-## 5. Export: `export_hive_value_gnn.py`
+## 6. Export: `export_hive_value_gnn.py`
 
 Perché due file separati (checkpoint del training e file esportato)? Sono
 artefatti diversi con scopi diversi, anche se entrambi finiscono in `.pt`:
@@ -273,7 +337,7 @@ Cosa fa, in breve:
 `torch.jit.script` su `GATv2Conv` (`Could not cast value of type
 Optional[Tensor] to bool`). Non è un bug di questo progetto.
 
-## 6. Inferenza in C++ (`NeuralEvaluator`)
+## 7. Inferenza in C++ (`NeuralEvaluator`)
 
 `TorchScriptValueEvaluator` (in `include/NeuralEvaluator.h` /
 `src/NeuralEvaluator.cpp`) incapsula il modello: lo carica una volta nel
@@ -300,7 +364,7 @@ dall'MCTS, non dall'evaluator. Per i tempi reali (latenza per chiamata,
 quota del tempo di ricerca spesa in inferenza) vedi
 `tests/TestTournamentBenchmark.cpp`.
 
-## 7. Regole d'oro (riassunto degli errori facili)
+## 8. Regole d'oro (riassunto degli errori facili)
 
 - Le dimensioni feature C++ (`BoardEncoder.h`) e Python
   (`hive_value_gnn.py`) devono combaciare: nessun controllo automatico.
@@ -311,7 +375,7 @@ quota del tempo di ricerca spesa in inferenza) vedi
   qualcosa del ponte: fa emergere i problemi di compatibilità subito, non
   dopo ore di training.
 
-## 8. Idee già individuate per il futuro (non implementate)
+## 9. Idee già individuate per il futuro (non implementate)
 
 - **Data augmentation D6**: nessuna feature dei nodi è direzionale, quindi
   le 12 simmetrie della board esagonale cambiano solo l'etichetta di
@@ -319,9 +383,6 @@ quota del tempo di ricerca spesa in inferenza) vedi
   sui tensori già serializzati, **permutando i 6 slot piani di
   `edge_attr`** (gli slot 6-8 — su/giù/self — e `x`, `u`, `edge_index`
   restano invariati). Moltiplicherebbe il dataset ×12 senza rigiocare nulla.
-- **Bootstrap da partite umane**: un convertitore C++ che rigioca partite in
-  notazione UHP (il parsing esiste già in `Engine`) ed emette lo stesso
-  JSONL del self-play.
 - **Testa WDL / cross-entropy**: alternativa alla MSE se la `tanh` saturasse
   (gradienti migliori vicino a ±1); da considerare solo se il problema si
   manifesta nei dati.
