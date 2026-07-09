@@ -31,6 +31,15 @@ qualsiasi lingua, tranne quando il client localizza anche il nome "guest"
 (caso raro, ~1%%: la partita viene scartata se nemmeno il replay decide).
 
 Sottigliezze del formato BoardSpace scoperte sui dati veri:
+  - esistono due dialetti: quello recente ("Dropb wG1 O 15 wL/", pezzi con
+    nome completo, referto RE presente) e quello degli archivi vecchi
+    (~2013 e prima: comandi minuscoli, pezzi SENZA colore -> l'identita'
+    arriva dal token colore di move/pmove o dal pick/pickb precedente,
+    salite scritte come riferimento nudo senza punto, NESSUN campo RE ->
+    l'esito puo' venire solo dal replay);
+  - il campo SU della variante ha attraversato tre epoche: "hive-plm"
+    (fino al ~2018), "Hive-PLM" (~2019-2023), "hive-plm 2 0 101" (attuale)
+    -> il confronto e' case-insensitive e si ferma a spazio o quadra;
   - un turno e' confermato solo dal comando `Done`: se il giocatore posa un
     pezzo, ci ripensa e lo riposa altrove, nel file compaiono piu' `Dropb`
     consecutivi -> conta solo l'ultimo prima del `Done`;
@@ -73,19 +82,39 @@ from pathlib import Path
 
 # Una riga di gioco: "; P0[7 Dropb wG1 O 14 wL/]TM[20849]"
 # Cattura anche chi la gioca (0/1): serve a riconoscere i pass impliciti.
-MOVE_LINE_RE = re.compile(r";\s*P([01])\[\d+ (\w+) ([^\]]*)\]")
+# Lo spazio dopo il comando e' opzionale: il formato vecchio scrive "done]"
+# attaccato, quello nuovo "Done ]" con lo spazio.
+MOVE_LINE_RE = re.compile(r";\s*P([01])\[\d+ (\w+) ?([^\]]*)\]")
 
-# I comandi che propongono una mossa (confermata poi dal Done). Pick/Pickb/
-# Start sono rumore dell'interfaccia. PMove/Pdropb sono le mosse fatte col
-# potere del pillbug (anche di pezzi avversari): la notazione finale e'
-# identica a Move/Dropb.
-DROP_COMMANDS = {"Dropb", "Pdropb"}   # args: <pezzo> <col> <riga> <rif>
-MOVE_COMMANDS = {"Move", "PMove"}     # args: <colore> <pezzo> <col> <riga> <rif>
+# I comandi che propongono una mossa (confermata poi dal Done). Start e'
+# rumore dell'interfaccia. PMove/Pdropb sono le mosse fatte col potere del
+# pillbug (anche di pezzi avversari): la notazione finale e' identica a
+# Move/Dropb. I confronti sono in minuscolo: gli archivi vecchi (~2013)
+# scrivono "move"/"dropb"/"done", quelli recenti "Move"/"Dropb"/"Done".
+DROP_COMMANDS = {"dropb", "pdropb"}   # args: <pezzo> <col> <riga> <rif>
+MOVE_COMMANDS = {"move", "pmove"}     # args: <colore> <pezzo> <col> <riga> <rif>
 
 # Azioni di cortesia confermate da un proprio Done ma che NON consumano il
 # turno di gioco (verificato sui dati: dopo un OfferDraw+Done e il relativo
 # DeclineDraw+Done, chi aveva offerto muove normalmente).
-NOOP_COMMANDS = {"OfferDraw", "DeclineDraw", "AcceptDraw"}
+NOOP_COMMANDS = {"offerdraw", "declinedraw", "acceptdraw"}
+
+# Un nome pezzo completo in stile moderno/UHP: colore minuscolo + tipo
+# maiuscolo + eventuale numero (wB1, bQ, wL1). Gli archivi vecchi invece
+# scrivono il pezzo SENZA colore ("dropb s1 ...", "move W L1 ..."): li'
+# il colore arriva dal token separato (move/pmove) o dal pick precedente.
+FULL_PIECE_RE = re.compile(r"[wb][A-Z]\d?")
+
+
+def piece_with_color(color_token: str, piece_token: str) -> str:
+    """Nome UHP del pezzo dati il token colore ('W'/'b') e il token pezzo.
+
+    Se il token pezzo e' gia' un nome completo (formato moderno) il colore
+    e' ridondante; altrimenti (formato vecchio: 'L1', 'q') lo si costruisce.
+    """
+    if FULL_PIECE_RE.fullmatch(piece_token):
+        return normalize_piece(piece_token)
+    return normalize_piece(color_token.lower() + piece_token.upper())
 
 # Parole per riconoscere una patta nel referto RE, nelle lingue viste
 # nell'archivio (inglese, francese, tedesco, russo, italiano, spagnolo).
@@ -132,7 +161,9 @@ def parse_sgf(text: str) -> dict:
     il pezzo piu' volte prima di confermare). Per risolvere i riferimenti `.`
     (salita su una cella occupata) si tracciano le posizioni di griglia.
     """
-    variant = re.search(r"SU\[(\S+)", text)
+    # Il campo puo' essere "SU[hive-plm 2 0 101]" (recente) o "SU[hive-plm]"
+    # (archivi vecchi): la variante finisce al primo spazio O alla quadra.
+    variant = re.search(r"SU\[([^\s\]]+)", text)
     p0 = re.search(r'P0\[id "(.*?)"\]', text)
     p1 = re.search(r'P1\[id "(.*?)"\]', text)
     result = re.search(r"RE\[(.*?)\]", text)
@@ -141,15 +172,19 @@ def parse_sgf(text: str) -> dict:
     resigned = False
     parse_error = None
     pending = None            # (pezzo, cella, riferimento) in attesa del Done
+    picked = None             # pezzo preso dall'ultimo pick/pickb (formato vecchio)
     stacks: dict = {}         # cella di griglia -> pila di pezzi (fondo->cima)
     where: dict = {}          # pezzo -> cella in cui si trova
 
     for player, command, args in MOVE_LINE_RE.findall(text):
-        if command == "Resign":
+        command = command.lower()
+        fields = args.split()
+
+        if command == "resign":
             resigned = True
             break
 
-        if command == "Pass":
+        if command == "pass":
             pending = ("pass", None, None)
             continue
 
@@ -157,16 +192,48 @@ def parse_sgf(text: str) -> dict:
             pending = ("noop", None, None)
             continue
 
-        if command in DROP_COMMANDS or command in MOVE_COMMANDS:
-            fields = args.split()
-            if command in MOVE_COMMANDS:
-                fields = fields[1:]  # salta la lettera del colore
-            # fields = [pezzo, colonna, riga, riferimento]
-            pending = (normalize_piece(fields[0]), (fields[1], fields[2]), fields[-1])
+        if command == "pick":
+            # <colore> <slot> <pezzo>: presa dalla mano. Nel formato vecchio
+            # e' l'unico punto in cui il colore del pezzo e' esplicito.
+            picked = piece_with_color(fields[0], fields[-1])
             continue
 
-        if command != "Done":
-            continue  # Pick/Pickb/Start: rumore dell'interfaccia
+        if command == "pickb":
+            # <col> <riga> <pezzo>: presa dalla board. Nel formato vecchio il
+            # token pezzo non ha colore: l'identita' vera e' chi sta in cima
+            # alla cella, che conosciamo dal tracciamento della griglia — o,
+            # se la cella e' quella di una posa non ancora confermata dal
+            # Done, e' quel pezzo (ripensamento: posa, riprende, riposa).
+            token = fields[-1]
+            cell = (fields[0], fields[1])
+            if FULL_PIECE_RE.fullmatch(token):
+                picked = normalize_piece(token)
+            elif pending is not None and pending[1] == cell:
+                picked = pending[0]
+            else:
+                stack = stacks.get(cell)
+                picked = stack[-1] if stack else None
+            continue
+
+        if command in DROP_COMMANDS:
+            # <pezzo> <col> <riga> <rif>: nel formato vecchio il token pezzo
+            # e' senza colore ("s1") -> vale l'identita' del pick precedente.
+            token = fields[0]
+            piece = normalize_piece(token) if FULL_PIECE_RE.fullmatch(token) else picked
+            if piece is None:
+                parse_error = f"dropb di '{token}' senza pick precedente"
+                break
+            pending = (piece, (fields[1], fields[2]), fields[-1])
+            continue
+
+        if command in MOVE_COMMANDS:
+            # <colore> <pezzo> <col> <riga> <rif>
+            pending = (piece_with_color(fields[0], fields[1]),
+                       (fields[2], fields[3]), fields[-1])
+            continue
+
+        if command != "done":
+            continue  # Start e simili: rumore dell'interfaccia
 
         if pending is None:
             # Done senza nessuna azione prima: se e' del giocatore che deve
@@ -206,7 +273,9 @@ def parse_sgf(text: str) -> dict:
         where[piece] = cell
 
     return {
-        "variant": variant.group(1) if variant else "",
+        # In minuscolo: negli anni il campo e' stato "hive-plm", "Hive-PLM"
+        # e "hive-plm 2 0 101" (la parte numerica e' gia' esclusa dalla regex).
+        "variant": variant.group(1).lower() if variant else "",
         "p0": p0.group(1) if p0 else "",
         "p1": p1.group(1) if p1 else "",
         "result": result.group(1) if result else "",
