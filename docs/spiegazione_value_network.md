@@ -57,11 +57,17 @@ python3 scripts/export_hive_value_gnn.py --weights checkpoint.pt --output hive_v
 |---|---|
 | `scripts/hive_value_gnn.py` | Definizione del modello (unica, condivisa) |
 | `scripts/train_hive_value_gnn.py` | Training sui dataset JSONL |
+| `scripts/train_colab.ipynb` | Notebook per il training su GPU (Colab) |
 | `scripts/export_hive_value_gnn.py` | Export TorchScript + fidelity check |
 | `scripts/boardspace_to_jsonl.py` | Converte partite umane BoardSpace in JSONL |
+| `scripts/download_boardspace.sh` | Scarica l'archivio BoardSpace e lancia la conversione |
 | `src/selfplay_main.cpp` (`SelfPlay`) | Generazione dati di self-play |
 | `src/BoardEncoder.cpp` | L'encoder board → grafo (unico, C++) |
 | `src/NeuralEvaluator.cpp` | Caricamento del `.pt` e inferenza in C++ |
+
+I **dati** invece non stanno nel repository: tutto ciò che è grande o
+rigenerabile vive in `data/` (nel `.gitignore`). Vedi §4 per il layout e
+per come si condividono.
 
 ## 2. Il modello (`scripts/hive_value_gnn.py`)
 
@@ -156,9 +162,9 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
   conversione mossa→notazione UHP vive dentro `Engine` e non serve al
   training.
 - **Con la rete non addestrata quasi tutte le partite finiscono in patta**
-  (per ripetizione o al tetto di mosse) e producono `z=0`: poco segnale. È
-  transitorio — il bootstrap iniziale verrà da partite umane, e da lì il
-  self-play produrrà partite sensate.
+  (per ripetizione o al tetto di mosse) e producono `z=0`: poco segnale. Per
+  questo il bootstrap iniziale viene dalle partite umane (§4): da lì in poi
+  il self-play produce partite sensate.
 - **Nessun parallelismo**: se la generazione diventa il collo di bottiglia,
   la strada è lanciare più processi `SelfPlay` (ognuno col suo blocco di
   seed/`game_id` e il suo file), non parallelizzare la singola ricerca MCTS.
@@ -174,14 +180,19 @@ così il training non distingue nemmeno da dove vengono i dati.
 
 <https://www.boardspace.net/hive/hivegames/> contiene le partite giocate
 online dal 2006 a oggi, una cartella `archive-ANNO/` per anno, dentro zip
-periodici (`games-Gen-2-2025.zip`, ...). Ordine di grandezza: ~5.000 partite
-l'anno, di cui ~40% della variante `hive-plm` = il nostro **Base+MLP**. Il
-solo 2025: 2.194 partite plm → 2.164 convertite (98,6%), ~115.000 posizioni
-con label vere e ben bilanciate tra vittorie del Bianco e del Nero.
+periodici (`games-Jan-2-2025.zip`, ...). La variante che ci interessa è
+`hive-plm` = il nostro **Base+MLP**, ed esiste solo **dal 2013** (anno di
+uscita del pillbug): gli anni precedenti producono file vuoti, innocui.
+
+Risultato sull'archivio completo 2013-2026: **~30.000 partite convertite,
+~1,58 milioni di posizioni** con label vere e ben bilanciate tra vittorie
+del Bianco e del Nero (tasso di conversione 89-99% a seconda dell'epoca del
+formato; il resto sono abbandoni non etichettabili e partite col pillbug
+pre-revisione delle regole, che l'engine attuale giustamente rifiuta).
 
 ```bash
 # scarica E converte un intervallo di anni (riavviabile: salta quanto gia' fatto)
-scripts/download_boardspace.sh 2010 2025
+scripts/download_boardspace.sh 2013 2026
 
 # solo conversione, per una cartella di zip qualsiasi:
 python3 scripts/boardspace_to_jsonl.py data/boardspace/2025 \
@@ -192,8 +203,38 @@ python3 scripts/boardspace_to_jsonl.py data/boardspace/2025 \
 richiesta ogni 0.4s per gentilezza verso il server, con retry sugli errori
 di rete) e produce un `data/boardspace_<anno>.jsonl` per anno; il dettaglio
 delle partite scartate finisce in `data/boardspace/<anno>/conversione.log`.
-Prima del ~2010 la variante `hive-plm` non esiste: quegli anni producono
-file vuoti, innocui per il training.
+
+Il formato SGF di BoardSpace è cambiato più volte negli anni (tre epoche
+del campo variante, due dialetti per le mosse, i file vecchi non hanno il
+referto: lì l'esito può venire solo dal replay). Il convertitore li
+gestisce tutti; il catalogo completo delle sottigliezze è nel docstring di
+`boardspace_to_jsonl.py`.
+
+### Dove stanno i dati e come si condividono
+
+Tutto vive in `data/`, che è nel `.gitignore`: il repository porta il
+codice, i dati si rigenerano dal codice. Layout:
+
+| Percorso | Contenuto | Peso |
+|---|---|---|
+| `data/boardspace/<anno>/*.zip` | Gli SGF originali: la "materia prima" | ~260 MB totali |
+| `data/boardspace_<anno>.jsonl` | Il dataset convertito, pronto per il training | ~12 GB totali |
+| `data/dataset_jsonl.zip` | I JSONL compressi (~44:1), per Drive/Colab | ~280 MB |
+
+Gli **zip sorgente** sono la parte da conservare (sono piccoli, e
+l'archivio online potrebbe cambiare o sparire); i JSONL si rigenerano da
+essi in ~30 minuti. Il file `dataset_jsonl.zip` si crea con:
+
+```bash
+cd data && zip dataset_jsonl.zip boardspace_*.jsonl && cd -
+```
+
+Il dataset già pronto sta nella **cartella Drive condivisa del progetto**
+(`HiveGotThis_colab/`), che contiene gli zip sorgente, `dataset_jsonl.zip`
+e i due script Python del training: chi ha bisogno dei dati li scarica da
+lì e scompatta `dataset_jsonl.zip` in `data/`, senza dover eseguire
+`download_boardspace.sh` (che rifà download e conversione da zero, molto
+più lenti). È la stessa cartella usata dal notebook Colab (§5).
 
 ### Come funziona
 
@@ -242,12 +283,14 @@ Accetta più file JSONL insieme (self-play + partite umane: stesso formato,
 il training non distingue la provenienza). Per ogni epoca stampa la MSE di
 training e, sulla validation, MSE e "segno-ok".
 
-**Training su GPU con Colab**: `scripts/train_colab.ipynb` è un notebook
-pronto — si carica su Drive una cartella con i due script Python e lo zip
-dei JSONL, e il checkpoint viene salvato direttamente su Drive (a prova di
-disconnessione). Su Colab si fa **solo il training**: l'export TorchScript
-resta in locale, dove vive l'ambiente con `torch_geometric==2.6.1` (è il
-motivo per cui checkpoint ed export sono due passi separati).
+**Training su GPU con Colab**: si fa con `scripts/train_colab.ipynb`. Il
+notebook legge dalla cartella Drive condivisa del progetto
+(`HiveGotThis_colab/`, vedi §4) i file `hive_value_gnn.py`,
+`train_hive_value_gnn.py` e `dataset_jsonl.zip`, e salva il checkpoint
+direttamente su Drive, a prova di disconnessione. Su Colab si fa **solo il
+training**: l'export TorchScript resta in locale, dove vive l'ambiente con
+`torch_geometric==2.6.1` (è il motivo per cui checkpoint ed export sono due
+passi separati).
 
 Con `--init-weights` il training parte dai pesi di un checkpoint precedente
 invece che da pesi casuali: è il meccanismo del **ciclo a generazioni**
@@ -287,9 +330,9 @@ sono corti.)
 `{"model_state_dict": ..., "epoch": ..., "val_mse": ..., "hidden_dim": ...,
 "heads": ..., "dropout": ...}` — il `load_weights` di `hive_value_gnn.py`
 (usato dall'export) accetta sia questo formato sia uno state_dict puro.
-Attenzione: se cambi `--hidden-dim` o `--heads` in training, devi passare
-gli stessi valori all'export, altrimenti `load_state_dict` fallisce per
-shape mismatch.
+Attenzione: se in training si cambiano `--hidden-dim` o `--heads`, gli
+stessi valori vanno passati anche all'export, altrimenti `load_state_dict`
+fallisce per shape mismatch.
 
 ## 6. Export: `export_hive_value_gnn.py`
 
