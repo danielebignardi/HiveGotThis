@@ -35,6 +35,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -69,6 +70,7 @@ def load_games(paths: list[str]) -> dict:
     """
     games: dict = defaultdict(list)
     for path in paths:
+        n_rows = 0
         with open(path) as f:
             for line_no, line in enumerate(f, 1):
                 line = line.strip()
@@ -79,6 +81,10 @@ def load_games(paths: list[str]) -> dict:
                 except json.JSONDecodeError as e:
                     raise ValueError(f"{path}:{line_no}: JSON malformato: {e}") from e
                 games[(path, rec["game_id"])].append(record_to_data(rec))
+                n_rows += 1
+        # flush=True: senza, in una pipe (Colab, log) l'output arriva a blocchi
+        # in ritardo e il caricamento sembra bloccato.
+        print(f"  caricato {path}: {n_rows} posizioni", flush=True)
     return games
 
 
@@ -177,11 +183,15 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    n_batches = len(train_loader)
+    progress_every = max(1, n_batches // 10)  # ~10 righe di avanzamento per epoca
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         running_loss = 0.0
         running_count = 0
-        for batch in train_loader:
+        epoch_start = time.monotonic()
+        for batch_idx, batch in enumerate(train_loader, 1):
             batch = batch.to(device)
             optimizer.zero_grad()
             pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
@@ -190,6 +200,12 @@ def main() -> None:
             optimizer.step()
             running_loss += loss.item() * batch.y.size(0)
             running_count += batch.y.size(0)
+
+            if batch_idx % progress_every == 0 and batch_idx < n_batches:
+                speed = running_count / (time.monotonic() - epoch_start)
+                print(f"  epoch {epoch}: batch {batch_idx}/{n_batches}  "
+                      f"MSE parziale {running_loss / running_count:.4f}  "
+                      f"({speed:.0f} posizioni/s)", flush=True)
         train_mse = running_loss / max(running_count, 1)
 
         line = f"epoch {epoch:>3}  train MSE {train_mse:.4f}"
@@ -217,7 +233,7 @@ def main() -> None:
             )
             line += "  [salvato]"
 
-        print(line)
+        print(line, flush=True)
 
     print(f"\nCheckpoint migliore salvato in: {output_path} (MSE {best_val:.4f})")
     print("Per esportarlo per il C++:")
