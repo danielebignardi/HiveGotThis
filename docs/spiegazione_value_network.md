@@ -58,6 +58,7 @@ python3 scripts/export_hive_value_gnn.py --weights checkpoint.pt --output hive_v
 | `scripts/hive_value_gnn.py` | Definizione del modello (unica, condivisa) |
 | `scripts/train_hive_value_gnn.py` | Training sui dataset JSONL |
 | `scripts/train_colab.ipynb` | Notebook per il training su GPU (Colab) |
+| `scripts/train_kaggle.ipynb` | Gemello per Kaggle (più RAM: dataset completo) |
 | `scripts/export_hive_value_gnn.py` | Export TorchScript + fidelity check |
 | `scripts/boardspace/boardspace_to_jsonl.py` | Converte partite umane BoardSpace in JSONL |
 | `scripts/boardspace/download_boardspace.sh` | Scarica l'archivio BoardSpace e lancia la conversione |
@@ -300,6 +301,18 @@ direttamente su Drive, a prova di disconnessione. Su Colab si fa **solo il
 training**: l'export TorchScript resta in locale, dove vive l'ambiente con
 `torch_geometric==2.6.1` (è il motivo per cui checkpoint ed export sono due
 passi separati).
+
+**Training su GPU con Kaggle**: `scripts/train_kaggle.ipynb` è il gemello
+per Kaggle Notebooks (~29 GB di RAM anche con GPU: il dataset completo ci
+sta senza `--sample`). I dati si collegano come Dataset Kaggle privato con
+gli stessi tre file della cartella Drive; le istruzioni passo-passo sono
+nella prima cella. Nota empirica: sul target value il dataset completo
+NON migliora rispetto al 40% (converge allo stesso punto dopo ~3M di
+esempi visti) — le posizioni di una stessa partita condividono la stessa
+etichetta z e sono quasi-duplicate, quindi l'informazione utile è limitata
+dal numero di partite, non di posizioni. Le posizioni in più tornerebbero
+utili con una policy head (§10), dove ogni posizione ha un'etichetta
+propria (la mossa giocata).
 
 Con `--init-weights` il training parte dai pesi di un checkpoint precedente
 invece che da pesi casuali: è il meccanismo del **ciclo a generazioni**
