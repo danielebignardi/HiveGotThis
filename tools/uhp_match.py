@@ -25,8 +25,17 @@ da torneo). Se si danno entrambi vince --time.
 """
 import argparse
 import random
+import shlex
 import subprocess
 import sys
+
+
+def time_param(seconds):
+    # Lo standard UHP vuole HH:MM:SS zero-padded ("bestmove time 00:00:05");
+    # il formato conta quando l'avversario e' un engine esterno.
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"time {h:02d}:{m:02d}:{s:02d}"
 
 
 class Engine:
@@ -35,7 +44,8 @@ class Engine:
         # Etichetta per i report: il modello distingue i due engine quando il
         # binario e' lo stesso (il caso tipico: stesso MCTS, pesi diversi).
         self.label = model if model else path
-        args = [path, model] if model else [path]
+        # shlex.split permette binari con argomenti, es. "path/nokamute uhp".
+        args = shlex.split(path) + ([model] if model else [])
         self.p = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
@@ -134,7 +144,7 @@ def play_game(white, black, variant, search_param, max_plies,
 
 
 def run_match(args):
-    search_param = f"time 0:0:{args.time}" if args.time else f"depth {args.depth}"
+    search_param = time_param(args.time) if args.time else f"depth {args.depth}"
     eng_a = Engine(args.white, args.white_model)
     eng_b = Engine(args.black, args.black_model)
     if eng_a.label == eng_b.label:
@@ -224,7 +234,7 @@ def main():
     args = ap.parse_args()
 
     if args.mode == "selfplay":
-        search_param = f"time 0:0:{args.time}" if args.time else f"depth {args.depth}"
+        search_param = time_param(args.time) if args.time else f"depth {args.depth}"
         print(f"Self-play: {args.engine} ({search_param})")
         # Due processi distinti anche se il binario e' lo stesso: play_game
         # applica ogni mossa a entrambi per tenerli in sincrono.
