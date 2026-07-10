@@ -64,6 +64,7 @@ python3 scripts/export_hive_value_gnn.py --weights checkpoint.pt --output hive_v
 | `src/selfplay_main.cpp` (`SelfPlay`) | Generazione dati di self-play |
 | `src/BoardEncoder.cpp` | L'encoder board → grafo (unico, C++) |
 | `src/NeuralEvaluator.cpp` | Caricamento del `.pt` e inferenza in C++ |
+| `tools/uhp_match.py` | Harness di valutazione: match tra modelli o engine via UHP |
 
 I **dati** invece non stanno nel repository: tutto ciò che è grande o
 rigenerabile vive in `data/` (nel `.gitignore`). Vedi §4 per il layout e
@@ -425,7 +426,58 @@ dall'MCTS, non dall'evaluator. Per i tempi reali (latenza per chiamata,
 quota del tempo di ricerca spesa in inferenza) vedi
 `tests/TestTournamentBenchmark.cpp`.
 
-## 8. Regole d'oro (riassunto degli errori facili)
+## 8. Valutazione: `tools/uhp_match.py`
+
+Il training misura la MSE, ma la domanda vera è un'altra: **la rete nuova
+gioca meglio della vecchia?** L'unico modo onesto di rispondere è farle
+giocare l'una contro l'altra. `tools/uhp_match.py` fa esattamente questo: è
+un arbitro che pilota due engine via protocollo UHP e conta i risultati. È
+il cancello del ciclo a generazioni: una rete viene promossa solo se batte
+la precedente.
+
+```bash
+# match tra due modelli (stesso binario), 20 partite da 1 secondo a mossa
+python3 tools/uhp_match.py match build/HiveEngine build/HiveEngine \
+    --white-model gen1.pt --black-model gen0.pt --games 20 --time 1
+
+# una singola partita engine contro se stesso, mossa per mossa
+python3 tools/uhp_match.py selfplay build/HiveEngine --model hive_value_gnn.pt
+```
+
+### Come funziona
+
+Lo script non conosce le regole di Hive: lancia i due engine come processi
+separati (ciascuno con il proprio eventuale modello `.pt` come argomento),
+chiede `bestmove` a chi tocca e applica la mossa a **entrambi** i processi
+con `play`, perché ognuno mantiene la propria board interna e le due vanno
+tenute sincronizzate. Lo stato terminale (`WhiteWins`, `BlackWins`, `Draw`)
+arriva dal GameString di risposta; una partita che supera `--max-plies`
+(default 200) conta come "non conclusa".
+
+Due accorgimenti rendono il confronto significativo:
+
+- **Aperture casuali** (`--opening-plies`, default 4): a parità di modello e
+  profondità l'engine è deterministico, quindi senza variazione tutte le
+  partite del match sarebbero identiche. Le prime mosse vengono pescate a
+  caso tra le `validmoves` (riproducibile via `--seed`).
+- **Partite a coppie**: ogni apertura viene giocata due volte, con i colori
+  invertiti. Un'apertura sbilanciata avvantaggia così una volta l'uno e una
+  volta l'altro, e in media il vantaggio si annulla.
+
+Nel riepilogo finale la patta vale mezzo punto (convenzione standard dei
+match). `--time S` (secondi a mossa) è la modalità da torneo; `--depth N`
+(N×1000 iterazioni MCTS) è deterministica e quindi riproducibile, utile per
+i test.
+
+### Non solo reti: engine diversi
+
+I due argomenti posizionali sono i **binari**, e UHP è uno standard
+pubblico: al posto del secondo `build/HiveEngine` si può passare qualsiasi
+engine che lo parli — ad esempio Mzinga (l'implementazione di riferimento)
+o nokamute. Stesso arbitro, zero modifiche: il confronto con engine esterni
+misura la forza assoluta, quello tra generazioni la forza relativa.
+
+## 9. Regole d'oro (riassunto degli errori facili)
 
 - Le dimensioni feature C++ (`BoardEncoder.h`) e Python
   (`hive_value_gnn.py`) devono combaciare: nessun controllo automatico.
@@ -436,7 +488,7 @@ quota del tempo di ricerca spesa in inferenza) vedi
   qualcosa del ponte: fa emergere i problemi di compatibilità subito, non
   dopo ore di training.
 
-## 9. Idee già individuate per il futuro (non implementate)
+## 10. Idee già individuate per il futuro (non implementate)
 
 - **Data augmentation D6**: nessuna feature dei nodi è direzionale, quindi
   le 12 simmetrie della board esagonale cambiano solo l'etichetta di
@@ -444,6 +496,17 @@ quota del tempo di ricerca spesa in inferenza) vedi
   sui tensori già serializzati, **permutando i 6 slot piani di
   `edge_attr`** (gli slot 6-8 — su/giù/self — e `x`, `u`, `edge_index`
   restano invariati). Moltiplicherebbe il dataset ×12 senza rigiocare nulla.
+- **Policy head**: oggi il ruolo della policy è svolto da un'euristica
+  scritta a mano (`EvaluateMove`), usata dall'MCTS per l'ordinamento
+  all'espansione e come progressive bias in UCB1. Una policy head imparata
+  (stile AlphaZero: prior per mossa + selezione PUCT) concentrerebbe le
+  simulazioni sulle mosse plausibili, rendendo la ricerca molto più profonda
+  a parità di budget — è il rimedio strutturale al sintomo "valuta bene ma
+  non converte". Condividerebbe il tronco GNN col value (costo di inferenza
+  quasi invariato) e i target di imitazione esistono già (la mossa giocata
+  nelle partite BoardSpace). Il cantiere è però grande: va progettata la
+  rappresentazione delle mosse in output e vanno toccati encoder, engine,
+  training ed export.
 - **Testa WDL / cross-entropy**: alternativa alla MSE se la `tanh` saturasse
   (gradienti migliori vicino a ±1); da considerare solo se il problema si
   manifesta nei dati.
