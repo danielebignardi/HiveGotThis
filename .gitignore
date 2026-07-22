@@ -53,6 +53,8 @@ third_party/
 # Executable files
 build/
 
+.codex-prev-932580f/
+
 # Files to obtain the test strings
 editMzingaMovesString
 editMzingaMovesString.cpp
