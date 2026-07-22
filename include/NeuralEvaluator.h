@@ -3,6 +3,7 @@
 
 #include "Board.h"
 #include "BoardEncoder.h"
+#include "Move.h"
 
 #include <torch/script.h>
 
@@ -72,6 +73,11 @@ public:
     // archi, poi somma agli id degli archi l'offset dei nodi gia' inseriti.
     // Questa funzione replica manualmente la stessa operazione in C++.
     std::vector<float> EvaluateGraphs(const std::vector<GNNGraph>& graphs);
+
+    // Restituisce una distribuzione di prior sulle mosse legali usando la
+    // policy head TorchScript. Se il modello esportato non contiene la policy
+    // head, restituisce un vettore vuoto e il chiamante puo' fare fallback.
+    std::vector<float> EvaluateMovePriors(const Board& board, const std::vector<Move>& moves);
 
 private:
     static int64_t NodeCount(const GNNGraph& graph);// num nodi e numero edge per creare il tensore

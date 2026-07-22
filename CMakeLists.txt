@@ -18,6 +18,7 @@ add_library(hive_core
     src/Evaluation.cpp
     src/MCTS.cpp
     src/BoardEncoder.cpp
+    src/MoveEncoder.cpp
     src/NeuralEvaluator.cpp
 )
 target_include_directories(hive_core PUBLIC ${TORCH_INCLUDE_DIRS})

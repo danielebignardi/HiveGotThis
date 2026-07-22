@@ -1,0 +1,15 @@
+APPUNTI
+il file selfplay_policy_gen1.jsonl
+è stato generato con questo comando:
+ python tools/uhp_match.py dataset build/HiveEngine \
+  --engine-arg hive_value_gnn.pt \
+  --output data/selfplay_policy_gen1.jsonl \
+  --games 100 \
+  --depth 1 \
+  --max-plies 100 \
+  --move-selection pi \
+  --random-plies 4 \
+  --temperature 0.5
+
+
+  

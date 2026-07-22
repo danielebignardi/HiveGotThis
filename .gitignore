@@ -60,3 +60,15 @@ mosseDaEditare.txt
 TODO.txt
 
 CLAUDE.md
+
+# Ambienti virtuali
+.venv/
+venv/
+env/
+
+
+
+.codex-prev-932580f/
+
+
+data/*.jsonl

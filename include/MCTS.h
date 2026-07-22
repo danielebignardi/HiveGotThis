@@ -12,6 +12,13 @@ namespace HiveGotThis
 
 class TorchScriptValueEvaluator; // definita in NeuralEvaluator.h
 
+struct PolicyTarget
+{
+    Move move;
+    int visitCount;
+    double pi;
+};
+
 // =============================================================================
 // TRANSPOSITION TABLE
 // =============================================================================
@@ -70,14 +77,20 @@ struct MCTSNode
     // Valutazione euristica della mossa [0,1], usata dal progressive bias
     double heuristicScore;
 
+    // Prior della policy head [0,1], usato da PUCT quando disponibile.
+    double policyPrior;
+
     // Mosse ancora da espandere (ordinate: peggiori in testa, migliori in coda)
     std::vector<Move> unexpandedMoves;
+
+    // Prior allineate a unexpandedMoves, vuote quando la policy non e' disponibile.
+    std::vector<double> unexpandedPriors;
 
     MCTSNode(Move move, MCTSNode* parent, double heuristicScore = 0.5);
     ~MCTSNode();
 
-    // Calcola il punteggio UCB1 di questo nodo dal punto di vista del genitore (negamax).
-    double UCB1(double explorationC, double logParentVisits) const;
+    // Calcola il punteggio di selezione dal punto di vista del genitore (negamax).
+    double SelectionScore(double explorationC, double logParentVisits, double sqrtParentVisits) const;
 };
 
 
@@ -90,6 +103,10 @@ class MCTS
 public:
     static Move Search(const Board& rootBoard, int timeLimitMs);
     static Move SearchIterations(const Board& rootBoard, int maxIterations);
+
+    // Esegue una ricerca a iterazioni fisse e restituisce, per ogni mossa legale
+    // alla radice, la distribuzione policy target derivata dalle visite MCTS.
+    static std::vector<PolicyTarget> SearchPolicyTargets(const Board& rootBoard, int maxIterations);
 
     // Deve essere impostata prima di chiamare Search/SearchIterations: l'MCTS
     // valuta le foglie sempre con la value network, non esiste piu' un fallback
@@ -118,7 +135,7 @@ public:
 
 private:
     // Iperparametri
-    static constexpr double EXPLORATION_C = 1.0;        // Peso dell'esplorazione in UCB1
+    static constexpr double EXPLORATION_C = 1.0;        // Peso dell'esplorazione in UCB/PUCT
     static constexpr int TIME_CHECK_INTERVAL = 128;     // Controlla il tempo ogni N iterazioni
 
     // Restituisce la transposition table persistente (per tutta la durata del
