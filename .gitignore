@@ -78,3 +78,5 @@ env/
 
 
 data/*.jsonl
+# Pesi locali condivisi fuori da git
+/weights/
