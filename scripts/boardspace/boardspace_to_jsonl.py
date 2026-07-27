@@ -10,6 +10,12 @@ formato prodotto da SelfPlay:
     {"game_id":0,"ply":12,"side_to_move":"White","z":1,"x":[...],
      "edge_index":[...],"edge_attr":[...],"u":[...]}
 
+Con --policy ogni riga contiene in piu' le mosse legali della posizione
+("moves":[{"move","features","pi","src","dst"},...], via `policytargets
+move`): pi vale 1 sulla mossa giocata dall'umano e 0 sulle altre - i target
+di imitazione per la policy head. src/dst descrivono la mossa in termini di
+nodi del grafo, per una futura policy sugli embedding dei nodi.
+
 Uso tipico (gli zip scaricati da archive-YYYY/ possono stare in una cartella):
 
     python3 scripts/boardspace/boardspace_to_jsonl.py data/boardspace/zips \
@@ -373,15 +379,20 @@ def game_state(game_string: str) -> str:
 # ── Replay di una partita ────────────────────────────────────────────────────
 
 def convert_game(engine: EngineClient, game: dict, game_id: int,
-                 out) -> tuple[int, str] | str:
+                 out, policy: bool = False) -> tuple[int, str] | str:
     """Rigioca la partita e scrive le sue posizioni su `out`.
 
     Ritorna (numero posizioni, verdetto) se convertita, altrimenti una
     stringa con il motivo dello scarto.
+
+    Con policy=True ogni posizione viene esportata con `policytargets move`
+    invece di `features`: oltre alla board contiene le mosse legali (con
+    move_features e descrizione strutturale src/dst) e pi=1 sulla mossa che
+    l'umano ha giocato - il formato di imitazione per la policy head.
     """
     engine.send("newgame Base+MLP")
 
-    records = []  # (ply, side_to_move, json delle feature)
+    records = []  # (ply, side_to_move, json della posizione)
     state = "NotStarted"
     ply = 0
     inserted_passes = 0  # pass forzati consecutivi inseriti da noi
@@ -391,10 +402,19 @@ def convert_game(engine: EngineClient, game: dict, game_id: int,
 
         # Posizione PRIMA della mossa, come nel SelfPlay. La board vuota di
         # ply 0 viene saltata (grafo senza nodi, il pooling e' mal definito).
+        # Il record entra in `records` solo quando si sa quale mossa e' stata
+        # davvero giocata qui: quella del file, oppure un pass forzato.
+        record = None
         if ply > 0:
-            features = engine.send("features")[0]
-            side = "White" if ply % 2 == 0 else "Black"
-            records.append((ply, side, features))
+            if policy:
+                reply = engine.send(f"policytargets move {move}")[0]
+                if not reply.startswith("err"):
+                    record = reply
+                # con "err" la mossa non e' legale ora: o e' un pass forzato
+                # non registrato dal client (gestito sotto) o la partita va
+                # scartata (il play qui sotto fallira' allo stesso modo)
+            else:
+                record = engine.send("features")[0]
 
         reply = engine.send("play " + move)[0]
         if reply.startswith("invalidmove") or reply.startswith("err"):
@@ -402,11 +422,20 @@ def convert_game(engine: EngineClient, game: dict, game_id: int,
             # Se l'engine dice che l'unica mossa legale e' pass, il pass e'
             # obbligato dalle regole: lo inseriamo e ritentiamo la mossa.
             if inserted_passes < 2 and engine.send("validmoves")[0] == "pass":
+                if policy and ply > 0:
+                    record = engine.send("policytargets move pass")[0]
+                if record is not None:
+                    side = "White" if ply % 2 == 0 else "Black"
+                    records.append((ply, side, record))
                 engine.send("play pass")
                 inserted_passes += 1
-                ply += 1  # il pass consuma un ply (la sua posizione e' gia' registrata)
+                ply += 1  # il pass consuma un ply
                 continue
             return f"mossa rifiutata: '{move}' al ply {ply} ({reply})"
+
+        if record is not None:
+            side = "White" if ply % 2 == 0 else "Black"
+            records.append((ply, side, record))
 
         inserted_passes = 0
         ply += 1
@@ -431,12 +460,12 @@ def convert_game(engine: EngineClient, game: dict, game_id: int,
         winner = re_winner
         verdict = "referto"
 
-    for ply, side, features in records:
+    for ply, side, pos_json in records:
         z = 0 if winner == "Draw" else (1 if side == winner else -1)
         # I metadati vanno in testa all'oggetto {"x":...} gia' pronto,
         # subito dopo la graffa di apertura: stesso trucco del SelfPlay.
         out.write(f'{{"game_id":{game_id},"ply":{ply},"side_to_move":"{side}",'
-                  f'"z":{z},{features[1:]}\n')
+                  f'"z":{z},{pos_json[1:]}\n')
     return (len(records), verdict)
 
 
@@ -474,6 +503,10 @@ def main() -> None:
                         help="Scarta partite piu' corte di cosi' (pochissimo segnale)")
     parser.add_argument("--game-id-start", type=int, default=0,
                         help="game_id della prima partita convertita (crescono di 1)")
+    parser.add_argument("--policy", action="store_true",
+                        help="Esporta anche i target di policy: per ogni posizione le mosse "
+                             "legali con move_features e pi=1 sulla mossa giocata dall'umano "
+                             "(dataset di imitazione, file ~2-3 volte piu' grandi)")
     args = parser.parse_args()
 
     engine = EngineClient(args.engine, args.model)
@@ -496,7 +529,7 @@ def main() -> None:
                 skipped["troppo corta"] += 1
                 continue
 
-            outcome = convert_game(engine, game, game_id, out)
+            outcome = convert_game(engine, game, game_id, out, policy=args.policy)
             if isinstance(outcome, str):
                 skipped[outcome.split(":")[0]] += 1  # il motivo prima dei dettagli
                 print(f"  scartata {name}: {outcome}", file=sys.stderr)

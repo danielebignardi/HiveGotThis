@@ -13,6 +13,8 @@
 namespace HiveGotThis
 {
 
+struct PolicyTarget; // definita in MCTS.h
+
 // =============================================================================
 // ENGINE
 // =============================================================================
@@ -86,7 +88,13 @@ private:
 
     // "policytargets depth N" - Esporta feature board + mosse legali con
     // move_features e pi derivato dalle visite MCTS alla radice.
+    // "policytargets move <MoveString>" - Stessa esportazione ma senza
+    // ricerca: pi=1 sulla mossa indicata (quella giocata nella partita che
+    // si sta rigiocando), 0 sulle altre. Per il dataset di imitazione.
     void CommandPolicyTargets(const std::string& param);
+
+    // Emissione JSON condivisa dalle due forme di policytargets.
+    void WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, int iterations);
 
     // "perft [depth]" - Conta le foglie dell'albero delle mosse fino a 'depth' a
     // partire dalla posizione corrente, stampando conteggio e tempo per ogni livello.

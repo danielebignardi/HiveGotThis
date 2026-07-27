@@ -521,10 +521,74 @@ void Engine::CommandFeatures()
     WriteOk();
 }
 
+// Indice del pezzo tra i nodi del grafo di BoardEncoder: i nodi sono i pezzi
+// in gioco, nell'ordine dell'enum PieceName (stesso contratto di encode()).
+// -1 se il pezzo non e' sulla board (piazzamento) o non e' valido.
+static int NodeIndexOf(const Board& board, PieceName piece)
+{
+    if (piece == PieceName::INVALID || !board.PieceInPlay(piece))
+        return -1;
+
+    int index = 0;
+    for (int i = 0; i < static_cast<int>(piece); ++i)
+        if (board.PieceInPlay(static_cast<PieceName>(i)))
+            ++index;
+    return index;
+}
+
 void Engine::CommandPolicyTargets(const std::string& param)
 {
-    int depth = 1;
     std::vector<std::string> tokens = Split(param);
+
+    // Forma "policytargets move <MoveString>": nessuna ricerca MCTS. Target
+    // di imitazione: pi=1 sulla mossa indicata (quella realmente giocata
+    // nella partita che si sta rigiocando), 0 sulle altre mosse legali.
+    // Usata dal convertitore BoardSpace per il dataset policy da partite
+    // umane; il confronto e' su (pezzo, destinazione), quindi la stringa
+    // puo' usare un pezzo di riferimento diverso da quello canonico.
+    if (!tokens.empty() && tokens[0] == "move")
+    {
+        std::string moveString = param.substr(param.find("move") + 4);
+        size_t start = moveString.find_first_not_of(' ');
+        moveString = (start == std::string::npos) ? "" : moveString.substr(start);
+
+        Move played = PassMove;
+        if (moveString != PassMoveString)
+        {
+            played = MoveStringToMove(moveString);
+            if (played.Piece == PieceName::INVALID)
+            {
+                WriteError("Mossa non riconosciuta: " + moveString);
+                return;
+            }
+        }
+
+        std::vector<Move> legalMoves;
+        m_board->GetValidMoves(legalMoves);
+
+        std::vector<PolicyTarget> targets;
+        targets.reserve(legalMoves.size());
+        bool found = false;
+        for (const Move& legal : legalMoves)
+        {
+            bool isPlayed = (played == PassMove)
+                ? legal == PassMove
+                : (legal.Piece == played.Piece && legal.Destination == played.Destination);
+            targets.push_back({legal, isPlayed ? 1 : 0, isPlayed ? 1.0 : 0.0});
+            found = found || isPlayed;
+        }
+
+        if (!found)
+        {
+            WriteError("La mossa non e' tra quelle legali: " + moveString);
+            return;
+        }
+
+        WritePolicyTargetsJson(targets, 0);
+        return;
+    }
+
+    int depth = 1;
     if (tokens.size() >= 2 && tokens[0] == "depth")
         depth = std::max(1, std::stoi(tokens[1]));
     else if (tokens.size() == 1 && !tokens[0].empty())
@@ -532,6 +596,11 @@ void Engine::CommandPolicyTargets(const std::string& param)
 
     int iterations = depth * 1000;
     std::vector<PolicyTarget> targets = MCTS::SearchPolicyTargets(*m_board, iterations);
+    WritePolicyTargetsJson(targets, iterations);
+}
+
+void Engine::WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, int iterations)
+{
     GNNGraph graph = BoardEncoder::encode(*m_board);
 
     const PolicyTarget* best = nullptr;
@@ -564,8 +633,48 @@ void Engine::CommandPolicyTargets(const std::string& param)
         ss << "\"move\":\"" << JsonEscape(MoveToMoveString(target.move)) << "\",";
         ss << "\"visits\":" << target.visitCount << ",";
         ss << "\"pi\":" << target.pi << ",";
-        ss << "\"features\":" << MoveFeaturesToJson(EncodeMoveFeatures(*m_board, target.move));
-        ss << "}";
+        ss << "\"features\":" << MoveFeaturesToJson(EncodeMoveFeatures(*m_board, target.move)) << ",";
+
+        // Descrizione strutturale della mossa in termini di nodi del grafo,
+        // per una futura policy sugli embedding dei nodi (v. doc §10):
+        //   src = indice nodo del pezzo mosso (-1 = piazzamento o pass);
+        //   dst = vicini occupati della destinazione, coppie [nodo, slot
+        //         direzione dal vicino VERSO la destinazione]; slot 6 (up)
+        //         = la destinazione e' in cima a quel pezzo (salita).
+        // Il pezzo mosso non compare mai in dst: dopo la mossa non e' piu'
+        // nella cella di partenza (se sotto ha un altro pezzo, vale quello).
+        ss << "\"src\":" << (target.move == PassMove ? -1 : NodeIndexOf(*m_board, target.move.Piece)) << ",";
+        ss << "\"dst\":[";
+        if (!(target.move == PassMove))
+        {
+            Index dest = target.move.Destination;
+            bool first = true;
+            PieceName onTop = m_board->GetPieceAt(dest);
+            if (onTop != PieceName::INVALID)
+            {
+                ss << "[" << NodeIndexOf(*m_board, onTop) << "," << GNNSlotUp << "]";
+                first = false;
+            }
+            else
+            {
+                for (int d = 0; d < 6; ++d)
+                {
+                    Index nb = GetNeighborAt(dest, static_cast<Direction>(d));
+                    if (!IsValidIndex(nb)) continue;
+
+                    PieceName np = m_board->GetPieceAt(nb);
+                    if (np == target.move.Piece)
+                        np = m_board->GetPieceUnder(np);
+                    if (np == PieceName::INVALID) continue;
+
+                    if (!first) ss << ",";
+                    ss << "[" << NodeIndexOf(*m_board, np) << ","
+                       << static_cast<int>(Opposite(static_cast<Direction>(d))) << "]";
+                    first = false;
+                }
+            }
+        }
+        ss << "]}";
     }
 
     ss << "]}";
