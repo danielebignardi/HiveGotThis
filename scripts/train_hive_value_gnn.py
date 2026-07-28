@@ -43,10 +43,47 @@ import torch
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-from hive_value_gnn import EDGE_IN_DIM, GLOBAL_DIM, NODE_IN_DIM, HiveValueGNN, load_weights
+from hive_value_gnn import EDGE_IN_DIM, GLOBAL_DIM, MOVE_FEATURE_DIM, NODE_IN_DIM, HiveValueGNN, load_weights
 
 
-def record_to_data(rec: dict) -> Data:
+def read_policy_targets(rec: dict, move_feature_dim: int) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    """Legge target policy opzionali dal record JSONL.
+
+    Formati accettati:
+      {"moves": [{"features": [...], "pi": 0.7}, ...]}
+      {"move_features": [[...], ...], "policy_target": [...]}
+    """
+    features = []
+    targets = []
+
+    if "moves" in rec:
+        for move in rec["moves"]:
+            features.append(move["features"])
+            targets.append(move.get("pi", move.get("policy", move.get("target", 0.0))))
+    elif "move_features" in rec:
+        features = rec["move_features"]
+        targets = rec.get("policy_target", rec.get("policy", rec.get("pi", [])))
+
+    if not features:
+        return (
+            torch.empty((0, move_feature_dim), dtype=torch.float32),
+            torch.empty((0,), dtype=torch.float32),
+            False,
+        )
+
+    move_features = torch.tensor(features, dtype=torch.float32).view(-1, move_feature_dim)
+    policy_target = torch.tensor(targets, dtype=torch.float32).view(-1)
+    if move_features.size(0) != policy_target.size(0):
+        raise ValueError("Numero di move_features diverso dal numero di target policy")
+
+    target_sum = float(policy_target.sum())
+    if target_sum > 0.0:
+        policy_target = policy_target / target_sum
+
+    return move_features, policy_target, True
+
+
+def record_to_data(rec: dict, move_feature_dim: int) -> Data:
     """Converte una riga del JSONL in un oggetto Data di PyTorch Geometric."""
     n_nodes = len(rec["x"]) // NODE_IN_DIM
     n_edges = len(rec["edge_attr"]) // EDGE_IN_DIM
@@ -58,11 +95,21 @@ def record_to_data(rec: dict) -> Data:
     edge_attr = torch.tensor(rec["edge_attr"], dtype=torch.float32).view(n_edges, EDGE_IN_DIM)
     u = torch.tensor(rec["u"], dtype=torch.float32).view(1, GLOBAL_DIM)
     y = torch.tensor([[float(rec["z"])]], dtype=torch.float32)  # [1,1] -> batcha a [B,1]
+    move_features, policy_target, has_policy = read_policy_targets(rec, move_feature_dim)
 
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, u=u, y=y)
+    return Data(
+        x=x,
+        edge_index=edge_index,
+        edge_attr=edge_attr,
+        u=u,
+        y=y,
+        move_features=move_features,
+        policy_target=policy_target,
+        has_policy=torch.tensor([has_policy], dtype=torch.bool),
+    )
 
 
-def load_games(paths: list[str], sample: float, seed: int) -> dict:
+def load_games(paths: list[str], sample: float, seed: int, move_feature_dim: int) -> dict:
     """Legge i JSONL e raggruppa le posizioni per partita.
 
     La chiave e' (file, game_id): il game_id da solo non basta, perche' file
@@ -90,7 +137,7 @@ def load_games(paths: list[str], sample: float, seed: int) -> dict:
                     rec = json.loads(line)
                 except json.JSONDecodeError as e:
                     raise ValueError(f"{path}:{line_no}: JSON malformato: {e}") from e
-                games[(path, rec["game_id"])].append(record_to_data(rec))
+                games[(path, rec["game_id"])].append(record_to_data(rec, move_feature_dim))
                 n_rows += 1
         # flush=True: senza, in una pipe (Colab, log) l'output arriva a blocchi
         # in ritardo e il caricamento sembra bloccato.
@@ -112,8 +159,43 @@ def split_by_game(games: dict, val_fraction: float, seed: int) -> tuple[list, li
     return train_data, val_data
 
 
+def policy_loss_for_batch(model: HiveValueGNN, batch) -> torch.Tensor:
+    if batch.move_features.numel() == 0:
+        return batch.y.new_tensor(0.0)
+
+    board_embedding = model.encode_board(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
+    logits = model.forward_policy_from_embedding(
+        board_embedding,
+        batch.move_features,
+        batch.move_features_batch,
+    )
+
+    total = logits.new_tensor(0.0)
+    count = 0
+    for graph_id in torch.unique(batch.move_features_batch):
+        mask = batch.move_features_batch == graph_id
+        target = batch.policy_target[mask]
+        target_sum = target.sum()
+        if target.numel() == 0 or target_sum <= 0:
+            continue
+        target = target / target_sum
+        total = total - (target * torch.nn.functional.log_softmax(logits[mask], dim=0)).sum()
+        count += 1
+
+    if count == 0:
+        return logits.new_tensor(0.0)
+    return total / count
+
+
+def batch_losses(model: HiveValueGNN, batch, policy_weight: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
+    value_loss = torch.nn.functional.mse_loss(pred, batch.y)
+    policy_loss = policy_loss_for_batch(model, batch) if policy_weight > 0.0 else pred.new_tensor(0.0)
+    return value_loss + policy_weight * policy_loss, value_loss, policy_loss
+
+
 @torch.no_grad()
-def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device) -> tuple[float, float, int]:
+def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device, policy_weight: float) -> tuple[float, float, int, float]:
     """Restituisce (MSE medio, accuratezza del segno sulle posizioni decisive,
     numero di posizioni decisive). "Decisive" = z != 0: li' il segno della
     predizione dice se la rete indovina il vincitore."""
@@ -122,12 +204,17 @@ def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device) -> t
     total_count = 0
     sign_correct = 0
     decisive = 0
+    total_policy_loss = 0.0
+    policy_batches = 0
 
     for batch in loader:
         batch = batch.to(device)
         pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
         total_loss += torch.nn.functional.mse_loss(pred, batch.y, reduction="sum").item()
         total_count += batch.y.size(0)
+        if policy_weight > 0.0 and batch.move_features.numel() > 0:
+            total_policy_loss += policy_loss_for_batch(model, batch).item()
+            policy_batches += 1
 
         mask = batch.y.view(-1) != 0
         decisive += int(mask.sum())
@@ -137,7 +224,8 @@ def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device) -> t
 
     mse = total_loss / max(total_count, 1)
     sign_acc = sign_correct / decisive if decisive > 0 else float("nan")
-    return mse, sign_acc, decisive
+    policy_loss = total_policy_loss / policy_batches if policy_batches > 0 else float("nan")
+    return mse, sign_acc, decisive, policy_loss
 
 
 def main() -> None:
@@ -155,6 +243,9 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=64, help="Deve combaciare con l'export")
     parser.add_argument("--heads", type=int, default=4, help="Deve combaciare con l'export")
     parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--move-feature-dim", type=int, default=MOVE_FEATURE_DIM)
+    parser.add_argument("--policy-weight", type=float, default=0.0,
+                        help="Peso della policy loss. Default 0 = training value-only compatibile coi dataset attuali")
     parser.add_argument("--device", type=str, default="cpu", help="cpu oppure cuda")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -162,7 +253,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
-    games = load_games(args.data, args.sample, args.seed)
+    games = load_games(args.data, args.sample, args.seed, args.move_feature_dim)
     if not games:
         print("Nessuna posizione trovata nei file dati.", file=sys.stderr)
         sys.exit(1)
@@ -172,13 +263,14 @@ def main() -> None:
     print(f"Dataset: {len(games)} partite, {len(train_data) + len(val_data)} posizioni "
           f"({n_decisive} decisive) -> train {len(train_data)}, validation {len(val_data)}")
 
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=args.batch_size) if val_data else None
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, follow_batch=["move_features"])
+    val_loader = DataLoader(val_data, batch_size=args.batch_size, follow_batch=["move_features"]) if val_data else None
 
     model = HiveValueGNN(
         hidden_dim=args.hidden_dim,
         heads=args.heads,
         dropout_p=args.dropout,
+        move_feature_dim=args.move_feature_dim,
     ).to(device)
 
     # Ciclo a generazioni: si parte dai pesi della rete precedente invece che
@@ -201,33 +293,44 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         model.train()
         running_loss = 0.0
+        running_value_loss = 0.0
+        running_policy_loss = 0.0
         running_count = 0
         epoch_start = time.monotonic()
         for batch_idx, batch in enumerate(train_loader, 1):
             batch = batch.to(device)
             optimizer.zero_grad()
-            pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
-            loss = torch.nn.functional.mse_loss(pred, batch.y)
+            loss, value_loss, policy_loss = batch_losses(model, batch, args.policy_weight)
             loss.backward()
             optimizer.step()
             running_loss += loss.item() * batch.y.size(0)
+            running_value_loss += value_loss.item() * batch.y.size(0)
+            running_policy_loss += policy_loss.item() * batch.y.size(0)
             running_count += batch.y.size(0)
 
             if batch_idx % progress_every == 0 and batch_idx < n_batches:
                 speed = running_count / (time.monotonic() - epoch_start)
                 print(f"  epoch {epoch}: batch {batch_idx}/{n_batches}  "
-                      f"MSE parziale {running_loss / running_count:.4f}  "
+                      f"value MSE parziale {running_value_loss / running_count:.4f}  "
                       f"({speed:.0f} posizioni/s)", flush=True)
-        train_mse = running_loss / max(running_count, 1)
+        train_loss = running_loss / max(running_count, 1)
+        train_mse = running_value_loss / max(running_count, 1)
+        train_policy_loss = running_policy_loss / max(running_count, 1)
 
         line = f"epoch {epoch:>3}  train MSE {train_mse:.4f}"
-        current = train_mse
+        if args.policy_weight > 0.0:
+            line += f"  train policy CE {train_policy_loss:.4f}  train loss {train_loss:.4f}"
+        current = train_loss
         if val_loader is not None:
-            val_mse, sign_acc, decisive = evaluate(model, val_loader, device)
+            val_mse, sign_acc, decisive, val_policy_loss = evaluate(model, val_loader, device, args.policy_weight)
             line += f"  val MSE {val_mse:.4f}"
             if decisive > 0:
                 line += f"  val segno-ok {sign_acc:.1%} (su {decisive} decisive)"
-            current = val_mse
+            if args.policy_weight > 0.0 and val_policy_loss == val_policy_loss:
+                line += f"  val policy CE {val_policy_loss:.4f}"
+                current = val_mse + args.policy_weight * val_policy_loss
+            else:
+                current = val_mse
 
         # Salva il checkpoint migliore (su validation se c'e', altrimenti su train).
         if current < best_val:
@@ -240,6 +343,8 @@ def main() -> None:
                     "hidden_dim": args.hidden_dim,
                     "heads": args.heads,
                     "dropout": args.dropout,
+                    "move_feature_dim": args.move_feature_dim,
+                    "policy_weight": args.policy_weight,
                 },
                 output_path,
             )

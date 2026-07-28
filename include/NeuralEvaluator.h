@@ -3,6 +3,7 @@
 
 #include "Board.h"
 #include "BoardEncoder.h"
+#include "Move.h"
 
 #include <torch/script.h>
 
@@ -36,7 +37,7 @@ namespace HiveGotThis
 //     batch      int64   [sumN]
 //
 // Il valore restituito e' assunto in [-1, 1] e dal punto di vista del giocatore
-// che deve muovere, come descritto in Hive_Python_Cpp_Interaction.md.
+// che deve muovere, come descritto in docs/spiegazione_value_network.md.
 class TorchScriptValueEvaluator
 {
 public:
@@ -72,6 +73,11 @@ public:
     // archi, poi somma agli id degli archi l'offset dei nodi gia' inseriti.
     // Questa funzione replica manualmente la stessa operazione in C++.
     std::vector<float> EvaluateGraphs(const std::vector<GNNGraph>& graphs);
+
+    // Restituisce una distribuzione di prior sulle mosse legali usando la
+    // policy head TorchScript. Se il modello esportato non contiene la policy
+    // head, restituisce un vettore vuoto e il chiamante puo' fare fallback.
+    std::vector<float> EvaluateMovePriors(const Board& board, const std::vector<Move>& moves);
 
 private:
     static int64_t NodeCount(const GNNGraph& graph);// num nodi e numero edge per creare il tensore

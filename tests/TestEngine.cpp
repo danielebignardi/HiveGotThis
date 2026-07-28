@@ -312,7 +312,10 @@ void TestBestMove()
                             out.find("wG3") != std::string::npos ||
                             out.find("wA1") != std::string::npos ||
                             out.find("wA2") != std::string::npos ||
-                            out.find("wA3") != std::string::npos;
+                       out.find("wA3") != std::string::npos ||
+                       out.find("wM")  != std::string::npos ||
+                       out.find("wL")  != std::string::npos ||
+                       out.find("wP")  != std::string::npos;
         CHECK("bestmove depth 1: restituisce una mossa bianca valida", hasWhiteMove);
         CHECK("bestmove depth 1: nessun errore",
               out.find("err ") == std::string::npos);
@@ -334,7 +337,10 @@ void TestBestMove()
                        out.find("wG3") != std::string::npos ||
                        out.find("wA1") != std::string::npos ||
                        out.find("wA2") != std::string::npos ||
-                       out.find("wA3") != std::string::npos;
+                       out.find("wA3") != std::string::npos ||
+                       out.find("wM")  != std::string::npos ||
+                       out.find("wL")  != std::string::npos ||
+                       out.find("wP")  != std::string::npos;
         CHECK("bestmove time: restituisce una mossa bianca", hasMove);
         CHECK("bestmove time: nessun errore",
               out.find("err ") == std::string::npos);

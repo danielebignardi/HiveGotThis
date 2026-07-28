@@ -142,6 +142,7 @@ MCTSNode::MCTSNode(Move move, MCTSNode* parent, double heuristicScore)
     , isTerminal(false)
     , provenResult(0)
     , heuristicScore(heuristicScore)
+    , policyPrior(0.0)
 {
 }
 
@@ -151,7 +152,7 @@ MCTSNode::~MCTSNode()
         delete child;
 }
 
-double MCTSNode::UCB1(double explorationC, double logParentVisits) const
+double MCTSNode::SelectionScore(double explorationC, double logParentVisits, double sqrtParentVisits) const
 {
     // Negamax: il valore di questo figlio e' dal punto di vista del SUO giocatore di turno
     // (l'avversario di chi sta scegliendo). Il genitore preferisce il figlio il cui
@@ -163,12 +164,15 @@ double MCTSNode::UCB1(double explorationC, double logParentVisits) const
     }
 
     // Valore del figlio in [-1,1] dal punto di vista del suo giocatore di turno.
-    // L'utilita' per il genitore e' (1 - childValue) / 2, rimappata in [0,1] cosi'
-    // che EXPLORATION_C e PROGRESSIVE_BIAS_WEIGHT mantengano la scala originale.
+    // L'utilita' per il genitore e' (1 - childValue) / 2, rimappata in [0,1].
     double childValue = totalValue / static_cast<double>(visitCount);
     double exploitation = (1.0 - childValue) / 2.0;
 
-    double exploration = explorationC * std::sqrt(logParentVisits / static_cast<double>(visitCount));
+    double exploration;
+    if (policyPrior > 0.0)
+        exploration = explorationC * policyPrior * sqrtParentVisits / static_cast<double>(visitCount + 1);
+    else
+        exploration = explorationC * std::sqrt(logParentVisits / static_cast<double>(visitCount));
 
     double bias = PROGRESSIVE_BIAS_WEIGHT * heuristicScore / static_cast<double>(visitCount + 1);
 
@@ -304,7 +308,7 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTab
     ++g_iterationCount;
 
     // === SELEZIONE ===
-    // Scende nell'albero seguendo UCB1 fino a un nodo da espandere, terminale, o provato.
+    // Scende nell'albero seguendo UCB/PUCT fino a un nodo da espandere, terminale, o provato.
     MCTSNode* node = root;
     Board board = rootBoard;
     int depth = 0;
@@ -312,13 +316,14 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTab
     while (node->isExpanded && !node->isTerminal && node->provenResult == 0)
     {
         double logParent = std::log(static_cast<double>(node->visitCount + 1));
+        double sqrtParent = std::sqrt(static_cast<double>(node->visitCount));
 
         MCTSNode* best = nullptr;
         double bestUCB = -std::numeric_limits<double>::max();
 
         for (MCTSNode* child : node->children)
         {
-            double ucb = child->UCB1(EXPLORATION_C, logParent);
+            double ucb = child->SelectionScore(EXPLORATION_C, logParent, sqrtParent);
             if (ucb > bestUCB)
             {
                 bestUCB = ucb;
@@ -369,6 +374,33 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTab
             {
                 board.GetValidMoves(node->unexpandedMoves);
                 OrderMoves(node->unexpandedMoves, board, board.currentColor);
+                node->unexpandedPriors.clear();
+
+                if (g_valueNetwork != nullptr)
+                {
+                    std::vector<float> priors = g_valueNetwork->EvaluateMovePriors(board, node->unexpandedMoves);
+                    if (priors.size() == node->unexpandedMoves.size())
+                    {
+                        std::vector<std::pair<Move, double>> ordered;
+                        ordered.reserve(node->unexpandedMoves.size());
+                        for (size_t i = 0; i < node->unexpandedMoves.size(); ++i)
+                            ordered.push_back({node->unexpandedMoves[i], static_cast<double>(priors[i])});
+
+                        // Stable: in caso di prior uguale conserva l'ordine euristico precedente.
+                        std::stable_sort(ordered.begin(), ordered.end(),
+                            [](const auto& a, const auto& b)
+                            {
+                                return a.second < b.second;
+                            }
+                        );
+
+                        for (size_t i = 0; i < ordered.size(); ++i)
+                        {
+                            node->unexpandedMoves[i] = ordered[i].first;
+                            node->unexpandedPriors.push_back(ordered[i].second);
+                        }
+                    }
+                }
             }
         }
 
@@ -378,14 +410,22 @@ void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTab
             Move move = node->unexpandedMoves.back();
             node->unexpandedMoves.pop_back();
 
+            double policyPrior = 0.0;
+            if (!node->unexpandedPriors.empty())
+            {
+                policyPrior = node->unexpandedPriors.back();
+                node->unexpandedPriors.pop_back();
+            }
+
             if (node->unexpandedMoves.empty())
                 node->isExpanded = true;
 
             // heuristicScore dal punto di vista di chi muove ora (board.currentColor),
-            // ovvero il genitore: si allinea con l'utilita' del genitore nel termine di bias di UCB1.
+            // ovvero il genitore: si allinea con l'utilita' del genitore nel termine di bias.
             double hScore = EvaluateMove(board, move, board.currentColor);
 
             MCTSNode* child = new MCTSNode(move, node, hScore);
+            child->policyPrior = policyPrior;
             node->children.push_back(child);
 
             board.ApplyMove(move);
@@ -602,6 +642,74 @@ Move MCTS::SearchIterations(const Board& rootBoard, int maxIterations)
     }
 
     return SelectBestMove(&root);
+}
+
+std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int maxIterations)
+{
+    std::vector<Move> legalMoves;
+    rootBoard.GetValidMoves(legalMoves);
+
+    std::vector<PolicyTarget> targets;
+    targets.reserve(legalMoves.size());
+
+    if (legalMoves.empty())
+        return targets;
+
+    if (legalMoves.size() == 1)
+    {
+        targets.push_back({legalMoves[0], 1, 1.0});
+        return targets;
+    }
+
+    Color rootColor = rootBoard.currentColor;
+    for (const Move& move : legalMoves)
+    {
+        if (IsInstantWin(rootBoard, move, rootColor))
+        {
+            for (const Move& candidate : legalMoves)
+            {
+                bool isWin = candidate.Piece == move.Piece && candidate.Destination == move.Destination;
+                targets.push_back({candidate, isWin ? 1 : 0, isWin ? 1.0 : 0.0,
+                                   static_cast<int8_t>(isWin ? -1 : 0)});
+            }
+            return targets;
+        }
+    }
+
+    MCTSNode root(PassMove, nullptr);
+    root.visitCount = 1;
+    TranspositionTable& tt = GetPersistentTranspositionTable();
+
+    for (int i = 0; i < maxIterations; ++i)
+    {
+        RunIteration(&root, rootBoard, tt);
+        if (root.provenResult != 0)
+            break;
+    }
+
+    int totalVisits = 0;
+    for (MCTSNode* child : root.children)
+        totalVisits += child->visitCount;
+
+    for (const Move& move : legalMoves)
+    {
+        int visits = 0;
+        int8_t proven = 0;
+        for (MCTSNode* child : root.children)
+        {
+            if (child->move.Piece == move.Piece && child->move.Destination == move.Destination)
+            {
+                visits = child->visitCount;
+                proven = child->provenResult;
+                break;
+            }
+        }
+
+        double pi = totalVisits > 0 ? static_cast<double>(visits) / static_cast<double>(totalVisits) : 0.0;
+        targets.push_back({move, visits, pi, proven});
+    }
+
+    return targets;
 }
 
 } // namespace HiveGotThis

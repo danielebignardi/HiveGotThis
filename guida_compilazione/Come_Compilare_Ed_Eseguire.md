@@ -15,7 +15,7 @@ modalità "solo euristica".
    mano — è troppo grande (~700 MB) per essere nel repository, quindi ognuno
    se la scarica sulla propria macchina.
 3. Un file `.pt`: la rete neurale già esportata da Python (vedi
-   `scripts/spiegazione_export_gnn.md` per come si genera).
+   `docs/spiegazione_value_network.md` per come si genera).
 
 ---
 

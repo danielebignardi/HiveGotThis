@@ -1,6 +1,7 @@
 #include "Engine.h"
 #include "Evaluation.h"
 #include "BoardEncoder.h"
+#include "MoveEncoder.h"
 #include "MCTS.h"
 
 #include <iostream>
@@ -10,9 +11,31 @@
 #include <chrono>
 #include <cstring>
 #include <cstdio>
+#include <iomanip>
 
 namespace HiveGotThis
 {
+
+namespace
+{
+std::string JsonEscape(const std::string& s)
+{
+    std::ostringstream out;
+    for (char c : s)
+    {
+        switch (c)
+        {
+            case '\\': out << "\\\\"; break;
+            case '"':  out << "\\\""; break;
+            case '\n': out << "\\n";  break;
+            case '\r': out << "\\r";  break;
+            case '\t': out << "\\t";  break;
+            default:   out << c;      break;
+        }
+    }
+    return out.str();
+}
+}
 
 // =============================================================================
 // COSTRUTTORE
@@ -115,6 +138,15 @@ void Engine::Run()
             else
                 CommandFeatures();
         }
+        else if (command == CommandString_PolicyTargets)
+        {
+            if (m_board == nullptr)
+                WriteError(ErrorMessage_NoGameInProgress);
+            else if (GameIsOver(m_board->GetBoardState()))
+                WriteError(ErrorMessage_GameIsOver);
+            else
+                CommandPolicyTargets(param);
+        }
         else if (command == CommandString_Perft)
         {
             if (m_board == nullptr)
@@ -152,7 +184,7 @@ void Engine::CommandNewGame(const std::string& param)
 {
     ResetGame();
 
-    GameType gt = GameType::Base; // Default: partita base senza espansioni
+    GameType gt = GameType::BaseMLP; // Default torneo: Base + Mosquito + Ladybug + Pillbug
 
     if (!param.empty())
     {
@@ -219,7 +251,7 @@ void Engine::CommandNewGame(const std::string& param)
     }
     else
     {
-        // Nessun parametro: partita base standard
+        // Nessun parametro: default torneo con tutte le espansioni
         m_board = new Board(gt);
         // m_board->StartGame(); // BUG UHP: setterebbe InProgress su una board vuota (0 mosse); deve restare NotStarted
     }
@@ -486,6 +518,113 @@ void Engine::CommandFeatures()
 {
     GNNGraph graph = BoardEncoder::encode(*m_board);
     std::cout << GNNGraphToJson(graph) << "\n";
+    WriteOk();
+}
+
+void Engine::CommandPolicyTargets(const std::string& param)
+{
+    std::vector<std::string> tokens = Split(param);
+
+    // Forma "policytargets move <MoveString>": nessuna ricerca MCTS. Target
+    // di imitazione: pi=1 sulla mossa indicata (quella realmente giocata
+    // nella partita che si sta rigiocando), 0 sulle altre mosse legali.
+    // Usata dal convertitore BoardSpace per il dataset policy da partite
+    // umane; il confronto e' su (pezzo, destinazione), quindi la stringa
+    // puo' usare un pezzo di riferimento diverso da quello canonico.
+    if (!tokens.empty() && tokens[0] == "move")
+    {
+        std::string moveString = param.substr(param.find("move") + 4);
+        size_t start = moveString.find_first_not_of(' ');
+        moveString = (start == std::string::npos) ? "" : moveString.substr(start);
+
+        Move played = PassMove;
+        if (moveString != PassMoveString)
+        {
+            played = MoveStringToMove(moveString);
+            if (played.Piece == PieceName::INVALID)
+            {
+                WriteError("Mossa non riconosciuta: " + moveString);
+                return;
+            }
+        }
+
+        std::vector<Move> legalMoves;
+        m_board->GetValidMoves(legalMoves);
+
+        std::vector<PolicyTarget> targets;
+        targets.reserve(legalMoves.size());
+        bool found = false;
+        for (const Move& legal : legalMoves)
+        {
+            bool isPlayed = (played == PassMove)
+                ? legal == PassMove
+                : (legal.Piece == played.Piece && legal.Destination == played.Destination);
+            targets.push_back({legal, isPlayed ? 1 : 0, isPlayed ? 1.0 : 0.0});
+            found = found || isPlayed;
+        }
+
+        if (!found)
+        {
+            WriteError("La mossa non e' tra quelle legali: " + moveString);
+            return;
+        }
+
+        WritePolicyTargetsJson(targets, 0);
+        return;
+    }
+
+    int depth = 1;
+    if (tokens.size() >= 2 && tokens[0] == "depth")
+        depth = std::max(1, std::stoi(tokens[1]));
+    else if (tokens.size() == 1 && !tokens[0].empty())
+        depth = std::max(1, std::stoi(tokens[0]));
+
+    int iterations = depth * 1000;
+    std::vector<PolicyTarget> targets = MCTS::SearchPolicyTargets(*m_board, iterations);
+    WritePolicyTargetsJson(targets, iterations);
+}
+
+void Engine::WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, int iterations)
+{
+    GNNGraph graph = BoardEncoder::encode(*m_board);
+
+    const PolicyTarget* best = nullptr;
+    for (const PolicyTarget& target : targets)
+    {
+        if (best == nullptr || target.visitCount > best->visitCount)
+            best = &target;
+    }
+
+    std::string graphJson = GNNGraphToJson(graph);
+    if (!graphJson.empty() && graphJson.back() == '}')
+        graphJson.pop_back();
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6);
+    ss << graphJson;
+    ss << ",\"turn\":\"" << JsonEscape(GetEnumString(m_board->currentColor)) << "\"";
+    ss << ",\"turn_index\":" << m_board->GetCurrentTurn();
+    ss << ",\"move_feature_dim\":" << MoveFeatureDim;
+    ss << ",\"mcts_iterations\":" << iterations;
+    ss << ",\"best_move\":\"" << JsonEscape(best ? MoveToMoveString(best->move) : PassMoveString) << "\"";
+    ss << ",\"moves\":[";
+
+    for (size_t i = 0; i < targets.size(); ++i)
+    {
+        const PolicyTarget& target = targets[i];
+        if (i > 0)
+            ss << ",";
+        ss << "{";
+        ss << "\"move\":\"" << JsonEscape(MoveToMoveString(target.move)) << "\",";
+        ss << "\"visits\":" << target.visitCount << ",";
+        ss << "\"pi\":" << target.pi << ",";
+        ss << "\"features\":" << MoveFeaturesToJson(EncodeMoveFeatures(*m_board, target.move)) << ",";
+        ss << MoveStructuralJson(*m_board, target.move);
+        ss << "}";
+    }
+
+    ss << "]}";
+    std::cout << ss.str() << "\n";
     WriteOk();
 }
 

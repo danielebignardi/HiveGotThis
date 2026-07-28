@@ -1,7 +1,9 @@
 #include "NeuralEvaluator.h"
+#include "MoveEncoder.h"
 
 #include <torch/utils.h> // torch::set_num_threads (non incluso da torch/script.h)
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace HiveGotThis
@@ -325,6 +327,107 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateGraphs(const std::vector<G
     return values;
 }
 
+std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& board, const std::vector<Move>& moves)
+{
+    if (moves.empty())
+        return {};
+
+    GNNGraph graph = BoardEncoder::encode(board);
+
+    // La posizione iniziale non ha ancora nodi: la GNN non puo' creare un
+    // embedding di board, quindi l'MCTS fara' fallback su prior euristiche.
+    if (graph.x.empty())
+        return {};
+
+    ValidateGraph(graph);
+
+    auto policyMethod = m_module.find_method("forward_policy");
+    if (!policyMethod)
+        return {};
+
+    torch::NoGradGuard noGrad;
+
+    const int64_t nodeCount = NodeCount(graph);
+    const int64_t edgeCount = EdgeCount(graph);
+    const int64_t moveCount = static_cast<int64_t>(moves.size());
+
+    auto fopt = torch::TensorOptions().dtype(torch::kFloat32);
+    auto iopt = torch::TensorOptions().dtype(torch::kInt64);
+
+    torch::Tensor x = torch::from_blob(
+        graph.x.data(),
+        {nodeCount, GNNNodeDim},
+        fopt
+    );
+
+    torch::Tensor edgeIndex = torch::from_blob(
+        graph.edge_index.data(),
+        {2, edgeCount},
+        iopt
+    );
+
+    torch::Tensor edgeAttr = torch::from_blob(
+        graph.edge_attr.data(),
+        {edgeCount, GNNEdgeDim},
+        fopt
+    );
+
+    torch::Tensor u = torch::from_blob(
+        graph.u.data(),
+        {1, GNNGlobalDim},
+        fopt
+    );
+
+    torch::Tensor batch = torch::zeros({nodeCount}, iopt);
+
+    std::vector<float> moveFeatureValues;
+    moveFeatureValues.reserve(static_cast<size_t>(moveCount) * MoveFeatureDim);
+
+    for (const Move& move : moves)
+    {
+        std::vector<float> features = EncodeMoveFeatures(board, move);
+        if (features.size() != MoveFeatureDim)
+            throw std::runtime_error("EncodeMoveFeatures returned an unexpected feature size");
+        moveFeatureValues.insert(moveFeatureValues.end(), features.begin(), features.end());
+    }
+
+    std::vector<int64_t> moveBatchIds(static_cast<size_t>(moveCount), 0);
+
+    torch::Tensor moveFeatures = torch::from_blob(
+        moveFeatureValues.data(),
+        {moveCount, MoveFeatureDim},
+        fopt
+    );
+
+    torch::Tensor moveBatch = torch::from_blob(
+        moveBatchIds.data(),
+        {moveCount},
+        iopt
+    );
+
+    std::vector<torch::jit::IValue> inputs = {
+        x,
+        edgeIndex,
+        edgeAttr,
+        u,
+        batch,
+        moveFeatures,
+        moveBatch
+    };
+
+    torch::Tensor logits = (*policyMethod)(inputs).toTensor();
+    if (!logits.defined() || logits.numel() != moveCount)
+        throw std::runtime_error("TorchScript policy head returned an unexpected number of logits");
+
+    torch::Tensor priorsTensor = torch::softmax(logits.reshape({moveCount}), 0);
+
+    std::vector<float> priors;
+    priors.reserve(moves.size());
+    for (int64_t i = 0; i < moveCount; ++i)
+        priors.push_back(priorsTensor[i].item<float>());
+
+    return priors;
+}
 int64_t TorchScriptValueEvaluator::NodeCount(const GNNGraph& graph)
 {
     // Ogni nodo ha GNNNodeDim feature.

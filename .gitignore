@@ -50,6 +50,12 @@ __pycache__/
 # Local libtorch install (downloaded, not committed)
 third_party/
 
+# Dataset locali (partite scaricate/generate e JSONL: grandi e rigenerabili)
+data/
+
+# Modelli e checkpoint locali nella radice (ognuno esporta i propri)
+/*.pt
+
 # Executable files
 build/
 
@@ -62,3 +68,11 @@ mosseDaEditare.txt
 TODO.txt
 
 CLAUDE.md
+
+# Ambienti virtuali
+.venv/
+venv/
+env/
+
+# Pesi locali condivisi fuori da git
+/weights/
