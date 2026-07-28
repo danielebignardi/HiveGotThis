@@ -8,6 +8,7 @@ include_directories(include)
 # Punta CMAKE_PREFIX_PATH alla cartella di libtorch, es.:
 #   cmake -B build -S . -DCMAKE_PREFIX_PATH=third_party/libtorch
 find_package(Torch REQUIRED)
+find_package(Threads REQUIRED)
 
 # Libreria comune
 add_library(hive_core
@@ -22,19 +23,19 @@ add_library(hive_core
     src/NeuralEvaluator.cpp
 )
 target_include_directories(hive_core PUBLIC ${TORCH_INCLUDE_DIRS})
-target_link_libraries(hive_core PUBLIC ${TORCH_LIBRARIES})
+target_link_libraries(hive_core PUBLIC ${TORCH_LIBRARIES} Threads::Threads)
 set_property(TARGET hive_core PROPERTY CXX_STANDARD 17)
 
 # Eseguibile principale (il bot UHP)
 add_executable(HiveEngine src/main.cpp)
 target_link_libraries(HiveEngine hive_core)
 
-# Generatore di dati self-play (una partita per esecuzione, output JSONL)
+# Generatore di dati self-play parallelo, output JSONL
 add_executable(SelfPlay src/selfplay_main.cpp)
 target_link_libraries(SelfPlay hive_core)
 
 # Test (escluso TestMoves: usa API Unix non disponibili su Windows)
-foreach(test TestBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestIsPinned TestEncoderShapes TestEdgeAlignment TestPerft TestPerftMidgame TestTournamentBenchmark TestMoves)
+foreach(test TestBoard TestParallelBoard TestSenzaBoard TestIsOneHive TestZobristHash TestZobristHash2 TestEngine TestIsPinned TestEncoderShapes TestEdgeAlignment TestPerft TestPerftMidgame TestTournamentBenchmark TestMoves)
     add_executable(${test} tests/${test}.cpp)
     target_link_libraries(${test} hive_core)
 endforeach()

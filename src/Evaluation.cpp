@@ -224,7 +224,7 @@ static int CountValidPlacements(const Board& board, Color color)
     int count = 0;
     // Usa un array booleano per deduplicare le posizioni candidate
     // Questo e' grande ma e' stack-allocated e molto veloce
-    static bool candidateChecked[BoardSize];
+    thread_local bool candidateChecked[BoardSize];
     std::memset(candidateChecked, 0, sizeof(candidateChecked));
 
     for (int p = 0; p < NumPieceNames; p++)

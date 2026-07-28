@@ -106,7 +106,7 @@ automatico che le tenga sincronizzate**.
 ## 3. Generazione dati: `SelfPlay`
 
 ```bash
-./build/SelfPlay <model.pt> <output.jsonl> [iterazioni] [maxPly] [seed] [plyTemperatura] [game_id] [numPartite]
+./build/SelfPlay <model.pt> <output.jsonl> [iterazioni] [maxPly] [seed] [plyTemperatura] [game_id] [numPartite] [device] [worker] [batchInferenza] [attesaBatchUs]
 ```
 
 | Argomento | Default | Significato |
@@ -119,10 +119,19 @@ automatico che le tenga sincronizzate**.
 | `plyTemperatura` | 10 | Ply iniziali con mossa campionata sulle visite MCTS (τ=1) |
 | `game_id` | 0 | Identificativo base delle partite |
 | `numPartite` | 1 | Quante partite giocare in questa esecuzione |
+| `device` | `auto` | `cpu`, `cuda`, `cuda:N`; `auto` preferisce CUDA quando disponibile |
+| `worker` | core disponibili | Numero massimo di partite eseguite contemporaneamente |
+| `batchInferenza` | `worker` | Richieste da partite diverse aggregate in un forward |
+| `attesaBatchUs` | 2000 | Attesa massima per riempire un batch GPU, in microsecondi |
 
-La partita i-esima del lotto usa `seed+i` e `game_id+i`: ogni singola
-partita resta riproducibile da sola rilanciando con `numPartite=1` e i
-valori corrispondenti.
+La partita i-esima usa `seed+i` e `game_id+i`. Per una riproducibilità
+bit-a-bit usare `worker=1` e `batchInferenza=1`: batch GPU diversi possono
+produrre minime differenze floating point e cambiare una scelta al limite.
+
+Per usare la GPU serve una distribuzione libtorch compilata con CUDA. Per
+esempio, `... 0 32 cuda 16 16 2000` genera 32 partite con 16 worker e batch
+condivisi fino a 16 richieste. Il batch non miscela foglie dello stesso
+albero: ogni MCTS esegue sempre una sola iterazione sequenziale alla volta.
 
 ### Formato dell'output
 
@@ -169,9 +178,9 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
   `tests/TestTournamentBenchmark.cpp` usa un avversario indipendente — ma in
   self-play è corretto e vantaggioso: stessa rete, stesse valutazioni, un
   valore calcolato per un colore vale anche per l'altro.
-- **Più partite nello stesso processo** (`numPartite`) evitano di ricaricare
-  il modello e mantengono calda la transposition table tra partite (che
-  condividono molte posizioni, soprattutto in apertura).
+- **Più partite nello stesso processo** (`numPartite`) condividono una sola
+  copia del modello. Ogni worker ha una transposition table separata e la
+  mantiene calda tra le partite che gli vengono assegnate.
 - **La board vuota di ply 0 è esclusa**: zero nodi non danno nulla da
   imparare, e il max-pooling su un grafo vuoto è mal definito.
 - **Le mosse compaiono come feature, non come notazione UHP**: al training
@@ -183,9 +192,10 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
   (per ripetizione o al tetto di mosse) e producono `z=0`: poco segnale. Per
   questo il bootstrap iniziale viene dalle partite umane (§4): da lì in poi
   il self-play produce partite sensate.
-- **Nessun parallelismo**: se la generazione diventa il collo di bottiglia,
-  la strada è lanciare più processi `SelfPlay` (ognuno col suo blocco di
-  seed/`game_id` e il suo file), non parallelizzare la singola ricerca MCTS.
+- **Parallelismo tra partite**: `SelfPlay` esegue più partite concorrenti con
+  una MCTS sequenziale per partita e aggrega le value request in batch
+  condivisi. Architettura, ownership e parametri sono descritti in
+  `docs/MCTS_Implementation.md`.
 
 ## 4. Bootstrap da partite umane: `boardspace_to_jsonl.py`
 
@@ -453,6 +463,11 @@ dal codice:
 - **Un solo thread libtorch** (`SetTorchThreads(1)`, chiamato da
   `main.cpp`): sui grafi piccoli di Hive il thread pool interno costa più di
   quanto renda (misurato ~3x più lento coi thread di default).
+
+Il self-play esegue piu' partite su worker CPU indipendenti. Ogni MCTS resta
+sequenziale; quando una partita richiede una valutazione si ferma, mentre il
+coordinatore raccoglie le richieste delle altre partite e le invia insieme a
+`EvaluateGraphs`. Non vengono usate virtual loss.
 
 L'MCTS chiama la rete solo sui cache miss della transposition table
 persistente; il segno negamax e la prospettiva side-to-move sono gestiti

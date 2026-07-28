@@ -17,10 +17,10 @@ namespace HiveGotThis
 //   - smarca cella i:    visited[i] = 0;        (0 != visitEpoch, che è sempre >= 1)
 //   - test cella i:      visited[i] == visitEpoch
 // L'unico memset reale avviene al wrap del contatore a 32 bit (~4 miliardi di chiamate).
-// È stato globale condiviso: una sola traversata attiva per volta, e i generatori che lo
-// usano non si annidano mai a vicenda.
-static uint32_t visited[BoardSize];
-static uint32_t visitEpoch = 0;
+// Lo scratch e' thread-local: una sola traversata attiva per worker, e i
+// generatori che lo usano non si annidano mai a vicenda.
+static thread_local uint32_t visited[BoardSize];
+static thread_local uint32_t visitEpoch = 0;
 
 static inline void BeginVisit()
 {
@@ -30,8 +30,8 @@ static inline void BeginVisit()
 // Scratch per la DFS dei punti di articolazione (vedi EnsureHiveAnalysisCurrent).
 // Non vanno azzerati: disc/low di una cella si leggono solo dopo averla visitata
 // nell'epoca corrente, quando sono già stati scritti.
-static int dfsDisc[BoardSize];
-static int dfsLow[BoardSize];
+static thread_local int dfsDisc[BoardSize];
+static thread_local int dfsLow[BoardSize];
 
 // Una Move è identificata univocamente da (Piece, Destination): la Source dipende dallo
 // stato del pezzo (NullIndex se in mano, posizione attuale altrimenti) e non aggiunge
@@ -39,7 +39,7 @@ static int dfsLow[BoardSize];
 // solo nelle celle marcate, evitando il costo di un unordered_set a ogni chiamata.
 static void DedupMoves(std::vector<Move>& moves)
 {
-    static bool seen[NumPieceNames][BoardSize];
+    thread_local bool seen[NumPieceNames][BoardSize];
 
     size_t write = 0;
     for (const Move& m : moves)
@@ -353,7 +353,7 @@ void Board::ArticulationDFS(Index u, Index parent, int& timer) const
 bool Board::IsOneHive(Index ignorePos) const
 {
     bool visitedPieces[NumPieceNames] = { false };
-    static std::vector<Index> queue;
+    thread_local std::vector<Index> queue;
     queue.clear();
     queue.reserve(NumPieceNames);
 
@@ -537,7 +537,7 @@ void Board::GetQueenBeeMoves(PieceName piece, std::vector<Move>& moves) const
     BeginVisit();
     visited[pos] = visitEpoch;
 
-    static std::vector<Index> steps;        // buffer riusato: niente malloc per chiamata
+    thread_local std::vector<Index> steps;  // buffer riusato per worker
     steps.clear();
     GetOneSlideSteps(pos, SlideMode::Ground, steps);
 
@@ -557,7 +557,7 @@ void Board::GetBeetleMoves(PieceName piece, std::vector<Move>& moves) const
     BeginVisit();
     visited[pos] = visitEpoch;
 
-    static std::vector<Index> steps;        // buffer riusato: niente malloc per chiamata
+    thread_local std::vector<Index> steps;  // buffer riusato per worker
     steps.clear();
     GetOneSlideSteps(pos, SlideMode::Beetle, steps);
 
@@ -604,7 +604,7 @@ void Board::GetSpiderMoves(PieceName piece, std::vector<Move>& moves) const
     BeginVisit();
 
     // Indici raggiungibili a ciascuno dei 3 passi (buffer riusati fra le chiamate).
-    static std::vector<Index> steps1, steps2, steps3;
+    thread_local std::vector<Index> steps1, steps2, steps3;
     steps1.clear();
 
     // inizio: indici raggiungibili dopo un passo
@@ -648,7 +648,7 @@ void Board::GetSoldierAntMoves(PieceName piece, std::vector<Move>& moves) const
     visited[pos] = visitEpoch;
 
     // Frontiera della BFS: partiamo dai vicini scivolabili (buffer riusato).
-    static std::vector<Index> queue;
+    thread_local std::vector<Index> queue;
     queue.clear();
     GetOneSlideSteps(pos, SlideMode::Ground, queue, pos);
     for (Index cell : queue) visited[cell] = visitEpoch;
@@ -681,8 +681,8 @@ void Board::GetLadybugMoves(PieceName piece, std::vector<Move>& moves) const
     // cella vuota. Più step1 diversi possono portare allo stesso step2, e più step2
     // diversi possono portare alla stessa cella d'arrivo: deduplichiamo entrambi i
     // livelli con due bitmap statici, ripristinati solo nelle celle toccate.
-    static bool step2Seen[BoardSize];
-    static bool destSeen [BoardSize];
+    thread_local bool step2Seen[BoardSize];
+    thread_local bool destSeen [BoardSize];
 
     // Passo 1: i 6 vicini occupati. Sono già distinti, niente dedup.
     Index steps1[6];
@@ -851,7 +851,7 @@ void Board::GetMosquitoMoves(PieceName piece, std::vector<Move>& moves) const
 
     // Dedup in-place dei soli self-move della Mosquito (Piece == piece && Source == pos).
     // I lanci generati da GetPillbugMoves hanno Piece diverso e passano invariati.
-    static bool destSeen[BoardSize];
+    thread_local bool destSeen[BoardSize];
     size_t write = tailStart;
     for (size_t r = tailStart; r < moves.size(); ++r)
     {
@@ -888,7 +888,7 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     int queenDeadline = (currentColor == Color::White) ? 6 : 7;             // turno entro il quale la regina in questione deve essere piazzata
     bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline); 
 
-    static std::vector<Index> positions;    // buffer riusato: niente malloc per chiamata
+    thread_local std::vector<Index> positions; // buffer riusato per worker
     positions.clear();
     GetValidPlacements(currentColor, positions);
 
@@ -902,7 +902,7 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     // Quali pezzi in mano sono piazzabili NON dipende dalla posizione di destinazione:
     // lo calcoliamo una volta sola, poi per ogni cella valida emettiamo la lista.
     // (Prima questo filtro O(NumPieceNames) girava per OGNI destinazione.)
-    static PieceName placeable[NumPieceNames];
+    thread_local PieceName placeable[NumPieceNames];
     int nPlaceable = 0;
     for (int p = 0; p < NumPieceNames; p++)
     {

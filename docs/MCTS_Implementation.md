@@ -1,422 +1,492 @@
-# MCTS Implementation
+# Implementazione della MCTS
 
-This document describes how Monte Carlo Tree Search (MCTS) is implemented in
-HiveGotThis. It is written for someone who knows MCTS in general terms but did
-not write this code.
+Questo documento descrive la Monte Carlo Tree Search usata da HiveGotThis e
+l'architettura con cui vengono generate piu' partite di self-play in parallelo.
+La descrizione segue il codice corrente.
 
-All code lives in two files:
+I file principali sono:
 
-- `include/MCTS.h` — the `MCTSNode`, `TranspositionTable`, and `MCTS` declarations.
-- `src/MCTS.cpp` — all the logic.
+- `include/MCTS.h` e `src/MCTS.cpp`: albero, selezione, solver e transposition
+  table.
+- `include/NeuralEvaluator.h` e `src/NeuralEvaluator.cpp`: inferenza
+  TorchScript su CPU o CUDA e batching tra partite.
+- `src/selfplay_main.cpp`: worker delle partite e scrittura del dataset JSONL.
+- `src/Board.cpp` e `src/Evaluation.cpp`: generazione delle mosse e buffer
+  temporanei resi sicuri per l'esecuzione concorrente.
 
-The public entry points are `MCTS::Search(board, timeLimitMs)` and
-`MCTS::SearchIterations(board, maxIterations)` (`src/MCTS.cpp:453` and `:497`).
-Both return the chosen `Move`. The engine calls them from
-`Engine::CommandBestMove` in response to the UHP `bestmove` command.
+## 1. API pubbliche
 
-One important structural note before the phases: **a tree node does not store a
-board.** `MCTSNode` (`include/MCTS.h:52`) stores only the `Move` that led to it,
-parent/child pointers, and statistics. The board state at any node is
-reconstructed on the fly each iteration by copying the root board and replaying
-moves down the path (`Board board = rootBoard;` then `board.ApplyMove(...)`,
-`src/MCTS.cpp:238`, `:258`, `:320`). This keeps the tree small and is why you
-will see a fresh `board` copy at the top of every iteration.
-
----
-
-## 1. Baseline MCTS — the four phases
-
-One MCTS iteration is `MCTS::RunIteration` (`src/MCTS.cpp:233`). It performs
-selection → expansion → evaluation → backpropagation in that order. `Search`
-calls it in a loop until the time/iteration budget runs out or the root is
-solved (see §3), then picks the final move with `SelectBestMove`.
-
-### The value convention (read this first)
-
-We use a **negamax, side-to-move** convention. Every value in the tree is in the
-range **`[-1, 1]` from the perspective of the player whose turn it is at that
-node**:
-
-- `+1` = the player to move at this node is winning,
-- `-1` = losing,
-- `0` = drawn / neutral.
-
-Because the side to move alternates every ply, a value that is "good" for one
-node is "bad" for its parent. We handle this by **flipping the sign at every
-level during backpropagation** (negamax). As a consequence, selection never
-needs a separate min/max branch — every node simply tries to maximize the
-negation of its children's values.
-
-A node's running statistics are:
-
-- `visitCount` — how many iterations passed through this node.
-- `totalValue` — the sum of backpropagated values, in node-to-move perspective.
-  The node's average value is `totalValue / visitCount ∈ [-1, 1]`.
-
-This convention was adopted deliberately so that leaf evaluation matches the
-planned GNN value network, which outputs `tanh ∈ [-1, 1]` from the side-to-move
-perspective. See §"Evaluation" for how the current heuristic is mapped into it.
-
-### Selection
-
-**Code:** the `while` loop at `src/MCTS.cpp:241-261`; the scoring formula is
-`MCTSNode::UCB1` (`src/MCTS.cpp:85`).
-
-Starting at the root, we descend by repeatedly picking the child with the
-highest UCB1 score, applying that child's move to the working board as we go.
-The loop continues while the current node is **fully expanded, not terminal, and
-not solved**:
+La classe `MCTS` espone tre modalita' di ricerca:
 
 ```cpp
-while (node->isExpanded && !node->isTerminal && node->provenResult == 0)
+Move MCTS::Search(const Board& board, int timeLimitMs);
+Move MCTS::SearchIterations(const Board& board, int maxIterations);
+std::vector<PolicyTarget> MCTS::SearchPolicyTargets(
+    const Board& board,
+    int maxIterations);
 ```
 
-The moment we reach a node that is *not* fully expanded (it still has moves to
-try), terminal, or solved, the loop stops and that node becomes the target of
-expansion/evaluation. (`isExpanded` only becomes true once **all** of a node's
-moves have been turned into children — see Expansion — so a partially-expanded
-node is treated as a leaf and gets one more child added.)
+`Search` usa un limite di tempo ed e' l'entry point naturale per il motore UHP.
+`SearchIterations` usa un numero fisso di iterazioni. `SearchPolicyTargets`
+esegue la stessa ricerca a iterazioni fisse, ma restituisce visite e
+distribuzione `pi` per addestrare la policy head durante il self-play.
 
-The per-child score (`UCB1`, `src/MCTS.cpp:99-106`) has three terms:
+Prima della ricerca deve essere registrato un evaluator:
 
 ```cpp
-exploitation = (1.0 - childValue) / 2.0;                              // negamax, in [0,1]
-exploration  = explorationC * sqrt(logParentVisits / visitCount);     // EXPLORATION_C = 1.0
-bias         = PROGRESSIVE_BIAS_WEIGHT * heuristicScore / (visitCount + 1);  // weight = 5.0
-score        = exploitation + exploration + bias;
+MCTS::SetValueNetwork(&evaluator);
 ```
 
-`childValue = totalValue / visitCount` is the child's average value in the
-**child's** perspective (the opponent of the node doing the selecting). The term
-`(1 - childValue) / 2` negates and re-maps it to `[0, 1]` = "win probability for
-the selecting node." Re-mapping back to `[0, 1]` keeps `EXPLORATION_C` and
-`PROGRESSIVE_BIAS_WEIGHT` on the same scale they had before the negamax
-refactor, so those constants did not need retuning. The `exploration` and
-`bias` terms are explained in §4 (progressive bias).
+La MCTS non possiede l'evaluator. Il chiamante deve mantenerlo vivo per tutta
+la durata delle ricerche.
 
-### Expansion
+## 2. Struttura dell'albero
 
-**Code:** `src/MCTS.cpp:279-338`.
+Un `MCTSNode` non contiene una copia della board. Conserva:
 
-Move generation is **eager per node, lazy across nodes.** The first time a node
-is visited for expansion (`unexpandedMoves.empty() && children.empty()`,
-`:283`), we:
+- la mossa che ha prodotto il nodo;
+- puntatore al padre e lista dei figli;
+- `visitCount` e `totalValue`;
+- stato di espansione e terminalita';
+- risultato certo del solver;
+- prior della policy e punteggio euristico;
+- mosse non ancora espanse e relative prior.
 
-1. Check whether the game is already over at this node (`GetBoardState()`,
-   `:285`). If so, mark it terminal and record a proven result (see §3) — no
-   children are generated.
-2. Otherwise generate **all** legal moves at once into `node->unexpandedMoves`
-   via `board.GetValidMoves(...)` and sort them (`OrderMoves`, see §5).
-
-Then we create **exactly one child per iteration** (`:305-318`): pop the best
-remaining move from the back of `unexpandedMoves`, build a single child node,
-and descend into it. `isExpanded` flips to `true` only when `unexpandedMoves`
-becomes empty (`:310-311`). So a node with N legal moves takes N iterations to
-fully expand, one child at a time — classic progressive expansion, not
-"generate all children immediately."
-
-The newly created child is immediately checked for being terminal too
-(`:325-336`), since the move may have just ended the game.
-
-### Evaluation
-
-**Code:** `src/MCTS.cpp:340-366`.
-
-The freshly reached/created leaf needs a value. There are three sources, in
-priority order:
-
-1. **Proven result** (`:345-348`): if the node has a certain win/loss (terminal
-   or solved, see §3), use `+1.0` / `-1.0` directly.
-2. **Transposition table hit** (`:354-357`): if this exact position was already
-   evaluated, reuse the cached value (see §2).
-3. **Heuristic** (`:360-364`): otherwise call the static evaluation and store
-   it in the TT.
-
-A **terminal check always happens before heuristic evaluation** — terminality is
-detected during expansion (`:285`, `:325`) and surfaces here as a non-zero
-`provenResult`, so a finished game is never handed to the heuristic.
-
-The heuristic is `EvaluateBoard` (`src/Evaluation.cpp`), which returns `[0, 1]`
-from a given perspective. We call it with **`board.currentColor`** (the side to
-move at the leaf) and remap to our `[-1, 1]` convention:
+All'inizio di ogni iterazione viene copiata soltanto la board della radice:
 
 ```cpp
-value = 2.0 * EvaluateBoard(board, board.currentColor) - 1.0;
+Board board = rootBoard;
 ```
 
-Note the perspective is the board's own side to move — **not** the root player.
-This is what makes the value side-to-move-relative. When the GNN value network
-replaces the heuristic, it will return `[-1, 1]` side-to-move directly and the
-`2v - 1` wrapper disappears; this single line (`src/MCTS.cpp:363`) is the only
-place leaf evaluation happens.
+Durante la selezione le mosse del percorso vengono riapplicate alla copia.
+Questo riduce la memoria dell'albero: una ricerca puo' creare molti nodi senza
+duplicare l'intero stato di gioco in ciascuno.
 
-### Backpropagation (backup)
+## 3. Convenzione dei valori
 
-**Code:** the loop at `src/MCTS.cpp:368-377` (and an identical one at `:263-277`
-for the solved-node shortcut).
+Tutti i valori seguono la convenzione negamax `side-to-move`:
 
-We walk from the leaf up to the root, and at **every** node:
+- `+1`: posizione vincente per il giocatore che deve muovere nel nodo;
+- `-1`: posizione perdente;
+- `0`: posizione neutrale o patta.
+
+`totalValue` accumula valori dalla prospettiva del giocatore di turno nel nodo.
+Durante il backup il segno viene invertito a ogni livello:
 
 ```cpp
 current->visitCount++;
 current->totalValue += value;
-value = -value;            // negamax sign flip
+value = -value;
 current = current->parent;
 ```
 
-The `value = -value` is the heart of the negamax convention: the leaf value is
-in the leaf's perspective; one level up the perspective is the opponent's, so we
-negate; and so on alternately up to the root. Each node therefore accumulates
-values in *its own* side-to-move perspective, which is exactly what `UCB1` reads
-back during selection. There is no separate min/max handling anywhere — the sign
-flip does all of it.
+La value network usa la stessa convenzione, quindi il suo output `[-1, 1]` puo'
+essere propagato direttamente.
 
-(There are two copies of this loop because a node that selection lands on which
-is *already* solved short-circuits expansion/evaluation and backs up its proven
-value directly, `:265-277`.)
+## 4. Una iterazione MCTS
 
-### Choosing the final move
+`MCTS::RunIteration` esegue sempre una sola iterazione completa:
 
-**Code:** `MCTS::SelectBestMove` (`src/MCTS.cpp:393`).
-
-After the search budget is exhausted, the move is chosen from the root's
-children — **not** by value but by robustness, in three tiers:
-
-1. A child that is a **proven win** for us. Careful: the root's children store
-   `provenResult` in the *opponent's* perspective, so a win for us is a child
-   whose mover (the opponent) **loses** → `provenResult == -1` (`:401`).
-2. Otherwise the **most-visited** child, skipping any proven loss for us
-   (`provenResult == 1`, `:418`). Visit count is MCTS's standard robustness
-   signal: the most-explored move is the most trusted.
-3. If every move is a proven loss, just play the most-visited one to delay the
-   defeat (`:429-440`).
-
----
-
-## 2. Addition: Transposition Table
-
-**What:** a fixed-size cache mapping a board position to a previously computed
-evaluation, so identical positions reached via different move orders are
-evaluated once.
-
-**Why:** Hive positions are frequently reachable by multiple move orders
-(transpositions). Re-running the heuristic (and, later, the GNN — which is far
-more expensive) for the same position wastes time. The TT turns repeated work
-into an O(1) lookup.
-
-**Where:** `class TranspositionTable` (`include/MCTS.h:25`, implemented
-`src/MCTS.cpp:17-60`); used inside evaluation at `src/MCTS.cpp:351-365`.
-
-**Keying — Zobrist hash.** Positions are keyed by the board's 64-bit Zobrist
-hash (`board.GetHash()`, `src/MCTS.cpp:351`). The hash is maintained
-incrementally by `Board` and **includes whose turn it is** (`ZobristBlackTurn`).
-This matters for our value convention: because the side to move is part of the
-key, a stored *side-to-move-relative* value is a deterministic function of the
-key and is always consistent — the same key always implies the same player to
-move, hence the same perspective. (This is also why the convention switch needed
-no TT changes beyond the value's range.)
-
-The table is a flat array of `2^sizePower2` entries; the index is the low bits
-of the hash (`hash & m_mask`, `:38`, `:50`). Both `Search` and
-`SearchIterations` create a `TranspositionTable tt(18)` — i.e. `2^18` entries —
-per call (`src/MCTS.cpp:473`, `:517`). The table is local to a single search and
-discarded afterward.
-
-**Replacement policy — depth-preferring.** Two positions can hash to the same
-slot (collisions, since we keep only the low bits). `Store` (`:48-60`)
-overwrites the existing entry **only if the new entry's `depth` is ≥ the stored
-one**:
-
-```cpp
-if (depth >= stored.depth) { ...overwrite... }
+```text
+selezione -> espansione -> valutazione -> backpropagation
 ```
 
-Here `depth` is the ply distance from the root at which the value was computed
-(`src/MCTS.cpp:239`, incremented while descending). Preferring greater depth
-keeps the entries that took the most work / are closest to the leaves, which are
-the more valuable cached results. `Probe` (`:36-46`) returns a hit only if the
-stored hash matches exactly **and** `depth > 0` — the `depth > 0` test doubles as
-an "occupied slot" check, since `Clear()` zeroes the table (`:30-34`).
+Non vengono raccolte piu' foglie dello stesso albero, non viene applicata
+virtual loss e non esistono thread concorrenti dentro una singola MCTS.
 
-`TTEntry` (`include/MCTS.h:17`) also carries an `isExact` flag (set from
-`node->isTerminal` at store time) to mark terminal vs. estimated values; it is
-recorded for completeness and future use.
+### 4.1 Selezione
 
----
+La ricerca parte dalla radice e scende finche' il nodo e':
 
-## 3. Addition: Proven-node solver (`TrySolve`)
+- completamente espanso;
+- non terminale;
+- non risolto dal solver.
 
-**What:** an exact minimax solver layered on top of the statistical search. When
-a subtree's outcome becomes *certain* (a forced win or forced loss), the solver
-marks it and propagates that certainty toward the root, so the search can trust
-it absolutely instead of relying on visit statistics.
+Per ogni figlio viene calcolato `MCTSNode::SelectionScore`.
 
-**Why:** plain MCTS only ever has *estimates*. But Hive games end concretely (a
-queen is surrounded), and near the end of a game whole subtrees are forced. The
-solver lets the engine (a) play a guaranteed mate immediately, (b) avoid a
-guaranteed loss, and (c) stop searching early once the root's result is known.
-It turns the tail of the game into perfect play.
+Il termine di sfruttamento converte il valore del figlio nella prospettiva del
+genitore:
 
-**Where:** the `provenResult` field on `MCTSNode` (`include/MCTS.h`),
-`MCTS::TrySolve` (`src/MCTS.cpp:188`), the terminal detection in expansion
-(`:292-295`, `:332-335`), the solver call after backup (`:381-384`), the
-`±max` short-circuit in `UCB1` (`:90-94`), and the proven-result handling in
-`SelectBestMove` (§1).
-
-**`provenResult` encoding.** `0` = unknown, `+1` = the player to move at this
-node has a forced win, `-1` = a forced loss. Like every other value, it is in
-the node's own side-to-move perspective.
-
-**How certainty is created.** When expansion reaches a finished game
-(`GameIsOver`), the node is marked terminal and its `provenResult` is set from
-the board result *relative to the node's side to move* (`src/MCTS.cpp:292-295`
-and `:332-335`):
-
-```cpp
-if (childState == BoardState::WhiteWins)
-    node->provenResult = (board.currentColor == Color::White) ? 1 : -1;
+```text
+childValue  = child.totalValue / child.visitCount
+exploitation = (1 - childValue) / 2
 ```
 
-(Typically the side to move at a just-finished node is the *loser* — their queen
-was just surrounded — so this is usually `-1`, but it is always computed from the
-state.)
+Se la policy head ha prodotto una prior valida viene usato un termine PUCT:
 
-**How certainty propagates (`TrySolve`, `:188-223`).** After a leaf with a known
-result is backed up, we call `TrySolve(node->parent)`. The rule is pure negamax
-minimax. A node's children carry results in the **opponent's** perspective, so:
-
-- **Forced win** (`:199-207`): if **any** child has `provenResult == -1` (the
-  opponent loses in that line), the player to move here can choose it → this
-  node is a forced win (`+1`). This fires **early**, before the node is fully
-  expanded — one winning reply is enough.
-- **Forced loss** (`:217-222`): only if **all** children are proven `+1` (every
-  reply wins for the opponent) **and** the node is fully expanded
-  (`node->isExpanded`) — we must be sure there is no unexplored escape before
-  declaring a loss.
-
-When a node's result is set, `TrySolve` recurses to its parent, so a single
-discovered mate can cascade all the way to the root. Once `root.provenResult`
-becomes non-zero, the search loop breaks early (`src/MCTS.cpp:488`, `:522`).
-
-**How the solver steers search and move choice.** A solved node short-circuits
-selection scoring in `UCB1` (`:90-94`): a child that is a loss for the opponent
-(`provenResult == -1`, i.e. a win for us) returns `+DBL_MAX` so we always steer
-into it; a win for the opponent returns `-DBL_MAX` so we avoid it. And
-`SelectBestMove` checks proven wins/losses first (§1).
-
----
-
-## 4. Addition: Progressive bias in selection
-
-**What:** an extra term in the UCB1 score that nudges selection toward moves the
-static heuristic likes, weighted so the nudge is strong when a node is young and
-fades as it accumulates visits.
-
-**Why:** standard UCB1 explores purely by visit counts, which is slow to find
-good moves in a wide tree (Hive can have many legal moves). Seeding selection
-with cheap heuristic knowledge focuses early exploration on plausible moves
-without permanently biasing the result — once a node has real statistics, the
-bias washes out.
-
-**Where:** the `bias` term in `MCTSNode::UCB1` (`src/MCTS.cpp:104`), the
-`heuristicScore` field on `MCTSNode`, the constant `PROGRESSIVE_BIAS_WEIGHT`
-(`include/MCTS.h:50`, value `5.0`), and where the score is computed at child
-creation (`src/MCTS.cpp:315`).
-
-```cpp
-bias = PROGRESSIVE_BIAS_WEIGHT * heuristicScore / (visitCount + 1);
+```text
+exploration =
+    C * policyPrior * sqrt(parentVisits) / (childVisits + 1)
 ```
 
-`heuristicScore ∈ [0, 1]` is computed once, when the child is created, by
-`EvaluateMove(board, move, board.currentColor)` (`:315`) — i.e. the move's
-quality from the perspective of the player making it. Because the bias is added
-when the **parent** evaluates the child, and that perspective is the parent's
-mover, a high `heuristicScore` correctly makes a move more attractive to the
-parent — consistent with the `(1 - childValue)/2` exploitation term. The
-`/(visitCount + 1)` denominator makes the term decay as the node is visited, so
-it dominates only early and then yields to real search statistics. This is the
-standard "progressive bias" technique.
+In assenza di prior si usa il fallback UCB1:
 
-The `exploration` term alongside it,
-`EXPLORATION_C * sqrt(logParentVisits / visitCount)` with `EXPLORATION_C = 1.0`
-(`include/MCTS.h:99`), is textbook UCB1.
-
----
-
-## 5. Addition: Move ordering
-
-**What:** legal moves at a node are sorted by the static heuristic before being
-turned into children.
-
-**Why:** since expansion adds one child per iteration (§1, Expansion), the
-*order* in which moves are expanded matters — we want to try promising moves
-first so the good lines get visits (and the solver gets a chance to find mates)
-sooner. It also synergizes with the solver's early-win: a winning reply found
-earlier propagates certainty earlier.
-
-**Where:** `MCTS::OrderMoves` (`src/MCTS.cpp:168`), called right after move
-generation (`:300`).
-
-```cpp
-std::sort(moves.begin(), moves.end(),
-    [&](const Move& a, const Move& b) {
-        return EvaluateMove(board, a, perspective) < EvaluateMove(board, b, perspective);
-    });
+```text
+exploration =
+    C * sqrt(log(parentVisits + 1) / childVisits)
 ```
 
-The sort is **ascending**, deliberately: expansion pops moves from the **back**
-of the vector (`unexpandedMoves.back()`, `:307`), so sorting worst-first puts the
-**best move last**, where it is expanded first. `EvaluateMove` is the same cheap
-per-move heuristic used for the progressive bias, evaluated from the moving
-player's perspective (`board.currentColor`).
+Infine viene aggiunto il progressive bias euristico:
 
----
-
-## 6. Addition: Instant-win check
-
-**What:** a fast pre-search test, done once at the root, that detects a move
-winning *immediately* (one that completes the surrounding of the opponent's
-queen) and plays it without searching at all.
-
-**Why:** it is wasteful (and occasionally risky, if the budget is small) to run
-a full MCTS search when a move wins on the spot. This guarantees the engine
-never overlooks a one-move win and returns instantly in that case.
-
-**Where:** `MCTS::IsInstantWin` (`src/MCTS.cpp:116`), called in the pre-search
-guard of both entry points (`src/MCTS.cpp:465-469` and `:509-513`):
-
-```cpp
-for (const Move& m : moves)
-    if (IsInstantWin(rootBoard, m, rootColor))
-        return m;
+```text
+bias =
+    PROGRESSIVE_BIAS_WEIGHT * heuristicScore / (childVisits + 1)
 ```
 
-`IsInstantWin` finds the opponent's queen, quickly rejects any move that does not
-end adjacent to (or on top of) it, then counts how many of the queen's six
-neighbors would be occupied **after** the move — correctly accounting for the
-fact that moving a piece *vacates* its source square
-(`board.stackHeight[move.Source] <= 1`, `:157`). If all six are occupied, the
-move wins and is returned immediately.
+Con i valori correnti:
 
-Note this is the only place `rootColor` (the actual player to move at the search
-root) is still used; the search proper is entirely side-to-move-relative.
+```text
+EXPLORATION_C = 1.0
+PROGRESSIVE_BIAS_WEIGHT = 5.0
+```
 
----
+Il bias aiuta nelle prime visite e decade progressivamente. Le statistiche
+della ricerca diventano quindi dominanti quando il nodo viene visitato spesso.
 
-## File / symbol quick reference
+Un risultato provato ha precedenza assoluta: una perdita certa per il
+giocatore del figlio e' una vittoria per il genitore e riceve il punteggio
+massimo; una vittoria certa dell'avversario riceve il minimo.
 
-| Concept | Location |
-| --- | --- |
-| Entry points | `MCTS::Search` `src/MCTS.cpp:453`, `MCTS::SearchIterations` `:497` |
-| One iteration (4 phases) | `MCTS::RunIteration` `src/MCTS.cpp:233` |
-| Selection loop | `src/MCTS.cpp:241-261` |
-| UCB1 score (+ bias) | `MCTSNode::UCB1` `src/MCTS.cpp:85` |
-| Expansion | `src/MCTS.cpp:279-338` |
-| Leaf evaluation (GNN seam) | `src/MCTS.cpp:363` |
-| Backup (negamax) | `src/MCTS.cpp:368-377` (and `:263-277`) |
-| Final move choice | `MCTS::SelectBestMove` `src/MCTS.cpp:393` |
-| Transposition table | `include/MCTS.h:25`, `src/MCTS.cpp:17-60` |
-| Solver | `MCTS::TrySolve` `src/MCTS.cpp:188`; `provenResult` field |
-| Move ordering | `MCTS::OrderMoves` `src/MCTS.cpp:168` |
-| Instant-win | `MCTS::IsInstantWin` `src/MCTS.cpp:116` |
-| Key constants | `EXPLORATION_C=1.0`, `PROGRESSIVE_BIAS_WEIGHT=5.0`, `TIME_CHECK_INTERVAL=128` (`include/MCTS.h`) |
+### 4.2 Espansione
+
+Al primo accesso a un nodo:
+
+1. viene controllato `BoardState`;
+2. se la partita e' terminata, il nodo viene marcato terminale;
+3. altrimenti vengono generate tutte le mosse legali;
+4. le mosse vengono ordinate con `EvaluateMove`;
+5. se esiste `forward_policy`, vengono calcolate le prior della policy.
+
+Quando le prior sono disponibili, mosse e prior vengono riordinate insieme.
+L'ordinamento e' stabile: a parita' di prior resta valido l'ordine euristico
+precedente.
+
+Una iterazione crea un solo figlio:
+
+```cpp
+Move move = node->unexpandedMoves.back();
+node->unexpandedMoves.pop_back();
+```
+
+Il nodo diventa `isExpanded` soltanto quando non restano mosse da trasformare
+in figli. Il nuovo stato viene controllato immediatamente per rilevare una
+vittoria o una patta prodotta dalla mossa.
+
+### 4.3 Valutazione della foglia
+
+Il valore della foglia viene scelto in questo ordine:
+
+1. risultato certo terminale o risolto;
+2. valore presente nella transposition table;
+3. inferenza della value network.
+
+Su un cache miss:
+
+```cpp
+value = evaluator->EvaluateBoard(board);
+```
+
+In una normale ricerca singola l'evaluator esegue direttamente il forward.
+Nel self-play parallelo la chiamata puo' fermarsi in attesa del coordinatore
+cross-game descritto nella sezione 8.
+
+### 4.4 Backpropagation
+
+Il valore viene propagato dalla foglia alla radice, incrementando visite e
+somma dei valori. L'inversione di segno a ogni passaggio mantiene ogni statistica
+nella prospettiva corretta.
+
+Se la foglia ha un risultato certo, dopo il backup viene invocato `TrySolve`
+sul padre.
+
+## 5. Policy target per il training
+
+`SearchPolicyTargets` restituisce un elemento per ogni mossa legale:
+
+```cpp
+struct PolicyTarget
+{
+    Move move;
+    int visitCount;
+    double pi;
+    int8_t provenResult;
+};
+```
+
+La distribuzione target e':
+
+```text
+pi(a) = N(a) / sum_b N(b)
+```
+
+dove `N(a)` e' il numero di visite del figlio associato alla mossa `a`.
+
+Nel self-play:
+
+- nei primi `tempPlies` la mossa viene campionata proporzionalmente alle visite;
+- successivamente viene scelta la mossa piu' visitata;
+- una vittoria provata viene giocata subito;
+- una sconfitta provata viene evitata finche' esiste un'alternativa.
+
+## 6. Solver dei risultati certi
+
+`provenResult` usa la prospettiva del giocatore che deve muovere nel nodo:
+
+- `0`: risultato non dimostrato;
+- `+1`: vittoria forzata;
+- `-1`: sconfitta forzata.
+
+Poiche' un figlio appartiene alla prospettiva dell'avversario:
+
+- basta un figlio con `provenResult == -1` per dimostrare la vittoria del padre;
+- il padre e' una sconfitta soltanto se e' completamente espanso e tutti i
+  figli hanno `provenResult == +1`.
+
+La vittoria puo' quindi essere propagata appena viene trovata una linea
+vincente. Per dimostrare una sconfitta devono invece essere escluse tutte le
+alternative.
+
+Quando la radice viene risolta, la ricerca termina anticipatamente.
+
+Prima di costruire l'albero, `IsInstantWin` controlla inoltre se una mossa
+legale circonda immediatamente la regina avversaria. In quel caso la mossa
+viene restituita senza avviare la ricerca.
+
+## 7. Transposition table
+
+La transposition table memorizza:
+
+```cpp
+struct TTEntry
+{
+    uint64_t hash;
+    double value;
+    int16_t depth;
+    bool isExact;
+};
+```
+
+La chiave e' l'hash Zobrist della board. L'hash comprende il giocatore di
+turno, quindi il valore `side-to-move` resta coerente con la posizione.
+
+La tabella:
+
+- e' un array di dimensione potenza di due;
+- usa `hash & mask` come indice;
+- verifica sempre l'hash completo per distinguere le collisioni;
+- preferisce la nuova entry quando la sua profondita' e' almeno quella
+  memorizzata.
+
+Nel self-play parallelo la TT e' `thread_local`. Ogni worker possiede una
+tabella indipendente da `2^19` entry, circa 12 MB:
+
+```text
+worker 0 -> TT 0
+worker 1 -> TT 1
+worker 2 -> TT 2
+...
+```
+
+La tabella resta viva tra i turni e tra le partite assegnate allo stesso
+worker. Non servono mutex e non ci sono data race. La memoria totale cresce
+pero' con il numero di worker:
+
+```text
+memoria TT approssimativa = worker * 12 MB
+```
+
+## 8. Parallelizzazione del self-play
+
+L'obiettivo del self-play e' massimizzare le partite generate per unita' di
+tempo. Il parallelismo e' applicato tra partite indipendenti.
+
+### 8.1 Architettura
+
+```text
+Game worker 0: Board + MCTS + TT + RNG --\
+Game worker 1: Board + MCTS + TT + RNG ----> coda value --> batch GPU
+Game worker 2: Board + MCTS + TT + RNG ----> condiviso  --> risultati
+Game worker N: Board + MCTS + TT + RNG --/
+
+writer principale <--- risultati completi ordinati per game_id
+```
+
+Ogni game worker:
+
+1. ottiene un indice tramite il contatore atomico `nextGame`;
+2. crea board, RNG e record della propria partita;
+3. chiama `SearchPolicyTargets` a ogni ply;
+4. consegna il risultato completo al thread principale.
+
+Il thread principale scrive i risultati in ordine di indice. Le partite
+possono terminare in ordine diverso, ma nel JSONL i `game_id` restano ordinati
+e ogni partita viene scritta come blocco completo.
+
+### 8.2 Ownership e sincronizzazione
+
+| Risorsa | Ownership | Protezione |
+|---|---|---|
+| Board e albero MCTS | una partita | nessuna condivisione |
+| RNG | una partita | nessuna condivisione |
+| Transposition table | un worker | `thread_local` |
+| Statistiche MCTS | un worker | `thread_local` |
+| Modello TorchScript | condiviso | `m_moduleMutex` |
+| Coda delle value request | condivisa | mutex + condition variable |
+| Output JSONL | thread principale | risultati consegnati tramite mutex |
+
+Anche i buffer temporanei riutilizzati da `Board.cpp` e `Evaluation.cpp` sono
+`thread_local`. Questo mantiene il beneficio del riuso delle allocazioni senza
+permettere a due partite di scrivere nello stesso scratch buffer.
+
+### 8.3 Batching tra partite
+
+`TorchScriptValueEvaluator::EnableCrossGameBatching` avvia un inference worker
+dedicato. Quando una MCTS incontra un cache miss:
+
+1. codifica la board in `GNNGraph`;
+2. inserisce una `ValueRequest` nella coda;
+3. conserva una `future<float>`;
+4. si blocca in attesa del risultato.
+
+Il thread `ValueBatchWorker`:
+
+1. aspetta la prima richiesta;
+2. raccoglie fino a `inferenceBatch` richieste;
+3. attende al massimo `batchWaitUs` per riempire il batch;
+4. chiama una sola volta `EvaluateGraphs`;
+5. completa le promise associate alle richieste.
+
+Ogni partita puo' avere al massimo una value request in volo, perche' la sua
+MCTS e' sequenziale. Di conseguenza:
+
+```text
+batch massimo realmente riempibile <= numero di worker attivi
+```
+
+Questo batch contiene foglie di alberi diversi. Non altera la selezione della
+singola MCTS e non richiede virtual loss.
+
+### 8.4 Accesso alla policy head
+
+La policy head viene usata durante l'espansione tramite
+`EvaluateMovePriors`. Il forward e' protetto dallo stesso mutex del modello,
+quindi e' sicuro tra thread.
+
+Attualmente le richieste policy non sono aggregate nella coda cross-game:
+sono eseguite e serializzate una alla volta. Il batching condiviso riguarda la
+value head, che rappresenta il percorso di valutazione delle foglie. Il
+batching della policy e' una possibile ottimizzazione futura.
+
+### 8.5 Perche' non parallelizzare il singolo albero
+
+Parallelizzare un solo albero richiederebbe:
+
+- sincronizzazione dei nodi e delle liste dei figli;
+- aggiornamenti atomici delle statistiche;
+- virtual loss per evitare selezioni duplicate;
+- gestione di risultati ottenuti su uno stato dell'albero gia' superato.
+
+Nel self-play esistono gia' molte partite indipendenti. Usarle come unita' di
+parallelismo offre batch naturali alla GPU e non modifica la semantica della
+ricerca. Per questo il progetto mantiene ogni MCTS sequenziale.
+
+## 9. Configurazione di SelfPlay
+
+La sintassi completa e':
+
+```text
+SelfPlay <model.pt> <output.jsonl>
+         [iterations] [maxPlies] [seed] [tempPlies]
+         [game_id] [numGames] [device]
+         [workers] [inferenceBatch] [batchWaitUs]
+```
+
+Esempio:
+
+```powershell
+.\build\SelfPlay.exe model.pt data\partite.jsonl `
+    400 200 1 10 0 32 cuda 16 16 2000
+```
+
+Questo comando usa:
+
+- 32 partite totali;
+- 16 partite concorrenti;
+- CUDA;
+- batch value fino a 16 richieste;
+- attesa massima del batch di 2000 microsecondi.
+
+I default sono:
+
+- `workers = min(numGames, hardware_concurrency)`;
+- `inferenceBatch = workers`;
+- `batchWaitUs = 2000`;
+- `device = auto`.
+
+`device=auto` usa CUDA quando disponibile e altrimenti la CPU. CUDA richiede
+una distribuzione libtorch compilata con supporto CUDA.
+
+Per riproducibilita' bit-a-bit usare:
+
+```text
+workers=1
+inferenceBatch=1
+```
+
+Batch GPU diversi possono produrre minime differenze floating point e, in una
+posizione al limite, modificare una scelta.
+
+## 10. Scelta dei parametri
+
+Indicazioni iniziali:
+
+- non impostare piu' worker del numero di partite;
+- non impostare `inferenceBatch` sopra `workers`;
+- considerare circa 12 MB di TT per worker;
+- provare batch 8, 16 e 32 su GPU;
+- ridurre `batchWaitUs` se la latenza e' piu' importante del throughput;
+- aumentarlo moderatamente se i batch restano spesso parziali.
+
+La configurazione migliore deve essere misurata in partite/ora, non soltanto
+in tempo medio del forward. Un numero eccessivo di worker puo' aumentare
+contesa, memoria e latenza senza migliorare il throughput.
+
+## 11. Test e diagnostica
+
+I test rilevanti sono:
+
+- `TestPerft`: correttezza e prestazioni della generazione delle mosse;
+- `TestParallelBoard`: genera alberi Perft completi su otto thread e verifica
+  che i conteggi siano identici;
+- `TestTournamentBenchmark`: misura iterazioni, cache hit e tempo della rete
+  nella ricerca a tempo;
+- smoke test di `SelfPlay`: controlla JSONL, numero di partite e risultati.
+
+Il Perft completo `Base+MLP` attualmente produce:
+
+| Profondita' | Nodi |
+|---:|---:|
+| 1 | 7 |
+| 2 | 294 |
+| 3 | 6.678 |
+| 4 | 151.686 |
+| 5 | 5.427.108 |
+| 6 | 192.353.904 |
+
+Questi valori sono un riferimento utile dopo modifiche alla concorrenza o ai
+buffer temporanei della board.
+
+## 12. Riferimento rapido
+
+| Concetto | Simbolo principale |
+|---|---|
+| Iterazione sequenziale | `MCTS::RunIteration` |
+| Selezione PUCT/UCB1 | `MCTSNode::SelectionScore` |
+| Target policy | `MCTS::SearchPolicyTargets` |
+| Solver | `MCTS::TrySolve` |
+| Vittoria immediata | `MCTS::IsInstantWin` |
+| TT per worker | `MCTS::GetPersistentTranspositionTable` |
+| Attivazione batch cross-game | `TorchScriptValueEvaluator::EnableCrossGameBatching` |
+| Inference worker | `TorchScriptValueEvaluator::ValueBatchWorker` |
+| Orchestrazione partite | `selfplay_main.cpp` |
+| Test thread safety | `tests/TestParallelBoard.cpp` |

@@ -3,9 +3,10 @@
 // (i conteggi devono restare stabili fra refactor di GetValidMoves).
 //
 // Uso:
-//   TestPerft                 -> perft da profondità 1 a 4 su GameType::Base
+//   TestPerft                 -> perft da profondità 1 a 4 su GameType::BaseMLP
 //   TestPerft <maxDepth>      -> perft fino a maxDepth
-//   TestPerft <maxDepth> <gt> -> usa GameType <gt> (Base, BaseM, BaseL, BaseP, BaseML, BaseMP, BaseLP, BaseMLP)
+//   TestPerft <maxDepth> <gt> -> usa GameType <gt> (Base, Base+M, Base+L,
+//                               Base+P, Base+ML, Base+MP, Base+LP, Base+MLP)
 
 #include "Board.h"
 
@@ -76,8 +77,8 @@ int main(int argc, char** argv)
     Board::InitializeZobristTable();
 
     int      maxDepth = (argc >= 2) ? std::atoi(argv[1]) : 4;
-    GameType gameType = (argc >= 3) ? GetGameTypeValue(argv[2]) : GameType::Base;
-    if (gameType == GameType::INVALID) gameType = GameType::Base;
+    GameType gameType = (argc >= 3) ? GetGameTypeValue(argv[2]) : GameType::BaseMLP;
+    if (gameType == GameType::INVALID) gameType = GameType::BaseMLP;
 
     Board board(gameType);
     board.StartGame();

@@ -228,7 +228,10 @@ A position and its dihedral-`D6` transforms (6 rotations of 60° × 2 reflection
 
 - State is canonicalized to the **side to move**, so the value is "goodness for the side to move."
 - With **tanh** output in [−1, 1]: target = `+1` win, `0` draw, `−1` loss. The backup toward the parent (opponent) node is **`−v`** (negamax). Loss: MSE.
-- **Batch the leaf evaluations (essential for feasibility):** the MCTS must **not** call the network one leaf at a time. Queue leaves to be evaluated and send them to the network in **batches**. This is what makes replacing a nanosecond C++ eval with a network viable.
+- **Batch leaf evaluations across self-play games (essential for feasibility):**
+  each MCTS keeps one evaluation in flight and remains sequential. Concurrent
+  games feed a shared inference queue, which sends their independent leaves to
+  the network in batches. This avoids virtual loss and keeps the GPU occupied.
 
 ---
 
