@@ -17,6 +17,13 @@ struct PolicyTarget
     Move move;
     int visitCount;
     double pi;
+
+    // Risultato provato dal solver per il nodo figlio raggiunto dalla mossa,
+    // dal punto di vista di chi muove DOPO di essa: -1 = l'avversario perde
+    // (la mossa vince per chi la gioca), +1 = l'avversario vince (mossa
+    // perdente), 0 = non provato. Il self-play lo usa per non campionare
+    // mai via una vittoria provata.
+    int8_t provenResult = 0;
 };
 
 // =============================================================================

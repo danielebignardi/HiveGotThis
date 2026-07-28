@@ -39,7 +39,7 @@ validazione che conta è invece la **fedeltà dell'export** (§6).
 
 ```bash
 # 1. genera partite di self-play (qui: 20 partite, 400 iterazioni/mossa)
-./build/SelfPlay hive_value_gnn.pt data/partite.jsonl 400 200 1 6 0 20
+./build/SelfPlay hive_value_gnn.pt data/partite.jsonl 400 200 1 10 0 20
 
 # 2. allena la rete sui dati
 python3 scripts/train_hive_value_gnn.py data/partite.jsonl --output checkpoint.pt
@@ -60,10 +60,12 @@ python3 scripts/export_hive_value_gnn.py --weights checkpoint.pt --output hive_v
 | `scripts/train_colab.ipynb` | Notebook per il training su GPU (Colab) |
 | `scripts/train_kaggle.ipynb` | Gemello per Kaggle (più RAM: dataset completo) |
 | `scripts/export_hive_value_gnn.py` | Export TorchScript + fidelity check |
-| `scripts/boardspace/boardspace_to_jsonl.py` | Converte partite umane BoardSpace in JSONL |
+| `scripts/boardspace/boardspace_to_jsonl.py` | Converte partite umane BoardSpace in JSONL (`--policy` per i target di imitazione) |
 | `scripts/boardspace/download_boardspace.sh` | Scarica l'archivio BoardSpace e lancia la conversione |
-| `src/selfplay_main.cpp` (`SelfPlay`) | Generazione dati di self-play |
+| `scripts/boardspace/convert_policy_all.sh` | Conversione policy dell'intero archivio, per anno in parallelo |
+| `src/selfplay_main.cpp` (`SelfPlay`) | Generazione dati di self-play (value + target policy) |
 | `src/BoardEncoder.cpp` | L'encoder board → grafo (unico, C++) |
+| `src/MoveEncoder.cpp` | L'encoder mossa → 32 feature + descrizione src/dst |
 | `src/NeuralEvaluator.cpp` | Caricamento del `.pt` e inferenza in C++ |
 | `tools/uhp_match.py` | Harness di valutazione: match tra modelli o engine via UHP |
 
@@ -104,7 +106,7 @@ automatico che le tenga sincronizzate**.
 ## 3. Generazione dati: `SelfPlay`
 
 ```bash
-./build/SelfPlay <model.pt> <output.jsonl> [iterazioni] [maxPly] [seed] [plyAperturaCasuale] [game_id] [numPartite]
+./build/SelfPlay <model.pt> <output.jsonl> [iterazioni] [maxPly] [seed] [plyTemperatura] [game_id] [numPartite]
 ```
 
 | Argomento | Default | Significato |
@@ -114,7 +116,7 @@ automatico che le tenga sincronizzate**.
 | `iterazioni` | 400 | Iterazioni MCTS per ogni mossa (non tempo: riproducibile) |
 | `maxPly` | 200 | Tetto di mosse: oltre, la partita viene troncata |
 | `seed` | casuale | Seed base (stampato per ogni partita) |
-| `plyAperturaCasuale` | 6 | Mosse iniziali scelte a caso invece che con MCTS |
+| `plyTemperatura` | 10 | Ply iniziali con mossa campionata sulle visite MCTS (τ=1) |
 | `game_id` | 0 | Identificativo base delle partite |
 | `numPartite` | 1 | Quante partite giocare in questa esecuzione |
 
@@ -128,7 +130,9 @@ Una riga JSON per posizione (JSONL: ogni riga è un oggetto autonomo — se
 un'esecuzione si interrompe, al massimo si perde l'ultima riga):
 
 ```json
-{"game_id":3,"ply":12,"side_to_move":"White","z":1,"x":[...],"edge_index":[...],"edge_attr":[...],"u":[...]}
+{"game_id":3,"ply":12,"side_to_move":"White","z":1,
+ "moves":[{"visits":37,"pi":0.0925,"features":[...],"src":3,"dst":[[0,2]]}, ...],
+ "x":[...],"edge_index":[...],"edge_attr":[...],"u":[...]}
 ```
 
 - **`x`, `edge_index`, `edge_attr`, `u`** — il grafo encodato, in versione
@@ -137,6 +141,12 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
   `u` = 21. Il training li rimodella con `view()`.
 - **`z`** — il label: esito finale dal punto di vista di chi muoveva. `+1`
   se ha poi vinto, `-1` se ha perso, `0` per patta o partita troncata.
+- **`moves`** — i target della policy head: una entry per mossa legale, con
+  `pi` = frazione delle visite MCTS alla radice (la distribuzione che la
+  policy impara a imitare), le 32 `features` di `MoveEncoder`, e la
+  descrizione strutturale `src`/`dst` in termini di nodi del grafo (per una
+  futura policy sugli embedding dei nodi, §10). Il training value-only li
+  ignora; con `--policy-weight > 0` diventano la seconda loss.
 - **`game_id`, `ply`, `side_to_move`** — metadati, non input di training.
   Rendono il file verificabile: con `side_to_move` si può controllare, dal
   solo file, che in ogni partita decisiva `z` sia `+1` per il colore
@@ -146,9 +156,13 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
 
 ### Scelte di design
 
-- **Le prime mosse sono casuali** perché MCTS a parità di pesi e posizione è
-  deterministico: senza rumore iniziale, N partite sarebbero la stessa
-  partita ripetuta N volte.
+- **Nei primi `plyTemperatura` ply la mossa si campiona sulle visite** (τ=1:
+  probabilità proporzionale a quanto MCTS ha esplorato ogni mossa) perché a
+  parità di pesi e posizione la ricerca è deterministica: senza una fonte di
+  varietà, N partite sarebbero la stessa partita ripetuta N volte. Rispetto
+  alle vecchie aperture uniformi, le mosse restano *sensate* (mai una
+  sconfitta provata, subito una vittoria provata) e le etichette `z` sono
+  più pulite. Dal ply `plyTemperatura` in poi si gioca la più visitata.
 - **I due colori condividono la transposition table** (quella persistente di
   `src/MCTS.cpp`). In torneo sarebbe irrealistico — l'avversario è un
   processo separato che non ci regala le sue valutazioni, e infatti
@@ -160,9 +174,11 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
   condividono molte posizioni, soprattutto in apertura).
 - **La board vuota di ply 0 è esclusa**: zero nodi non danno nulla da
   imparare, e il max-pooling su un grafo vuoto è mal definito.
-- **Le mosse giocate non vengono salvate** (solo le posizioni encodate): la
-  conversione mossa→notazione UHP vive dentro `Engine` e non serve al
-  training.
+- **Le mosse compaiono come feature, non come notazione UHP**: al training
+  servono `move_features` e `pi`, non la stringa della mossa (la conversione
+  mossa→notazione UHP vive dentro `Engine`). La ricerca passa da
+  `SearchPolicyTargets`, che costa esattamente quanto `SearchIterations` ma
+  espone la distribuzione delle visite alla radice.
 - **Con la rete non addestrata quasi tutte le partite finiscono in patta**
   (per ripetizione o al tetto di mosse) e producono `z=0`: poco segnale. Per
   questo il bootstrap iniziale viene dalle partite umane (§4): da lì in poi
@@ -199,6 +215,11 @@ scripts/boardspace/download_boardspace.sh 2013 2026
 # solo conversione, per una cartella di zip qualsiasi:
 python3 scripts/boardspace/boardspace_to_jsonl.py data/boardspace/2025 \
     --output data/boardspace_2025.jsonl --model hive_value_gnn.pt
+
+# conversione col formato policy (--policy): ogni posizione porta anche le
+# mosse legali con pi=1 su quella giocata dall'umano (imitazione, ~4x piu'
+# grande). Per l'archivio intero, in parallelo per anno:
+scripts/boardspace/convert_policy_all.sh
 ```
 
 `download_boardspace.sh` scarica gli zip in `data/boardspace/<anno>/` (una
@@ -509,17 +530,20 @@ misura la forza assoluta, quello tra generazioni la forza relativa.
   sui tensori già serializzati, **permutando i 6 slot piani di
   `edge_attr`** (gli slot 6-8 — su/giù/self — e `x`, `u`, `edge_index`
   restano invariati). Moltiplicherebbe il dataset ×12 senza rigiocare nulla.
-- **Policy head**: oggi il ruolo della policy è svolto da un'euristica
-  scritta a mano (`EvaluateMove`), usata dall'MCTS per l'ordinamento
-  all'espansione e come progressive bias in UCB1. Una policy head imparata
-  (stile AlphaZero: prior per mossa + selezione PUCT) concentrerebbe le
-  simulazioni sulle mosse plausibili, rendendo la ricerca molto più profonda
-  a parità di budget — è il rimedio strutturale al sintomo "valuta bene ma
-  non converte". Condividerebbe il tronco GNN col value (costo di inferenza
-  quasi invariato) e i target di imitazione esistono già (la mossa giocata
-  nelle partite BoardSpace). Il cantiere è però grande: va progettata la
-  rappresentazione delle mosse in output e vanno toccati encoder, engine,
-  training ed export.
+- **Policy head — IN CORSO (luglio 2026)**: l'infrastruttura è implementata.
+  La rete ha una `policy_head` "move-as-input" (embedding di board + 32
+  feature della mossa da `MoveEncoder` → logit, softmax sulle sole legali;
+  `forward()` resta value-only, compatibile coi modelli vecchi); l'MCTS usa
+  le prior come termine PUCT quando il modello esportato le contiene
+  (fallback automatico all'euristica `EvaluateMove` altrimenti); i target
+  arrivano da tre strade: `SelfPlay` (visite MCTS, §3), il convertitore con
+  `--policy` (imitazione delle mosse umane, §4), `uhp_match dataset` (via
+  UHP). Il training si attiva con `--policy-weight`. Restano da fare: il
+  primo training vero, la misura del costo (una chiamata rete in più per
+  espansione) e il match di verifica. Evoluzione candidata ("v2"): policy
+  sugli **embedding dei nodi** invece delle 32 feature a mano — i campi
+  `src`/`dst` già emessi nei dataset servono a quello, senza rigiocare
+  l'archivio.
 - **Testa WDL / cross-entropy**: alternativa alla MSE se la `tanh` saturasse
   (gradienti migliori vicino a ±1); da considerare solo se il problema si
   manifesta nei dati.

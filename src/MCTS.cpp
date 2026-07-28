@@ -669,7 +669,8 @@ std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int 
             for (const Move& candidate : legalMoves)
             {
                 bool isWin = candidate.Piece == move.Piece && candidate.Destination == move.Destination;
-                targets.push_back({candidate, isWin ? 1 : 0, isWin ? 1.0 : 0.0});
+                targets.push_back({candidate, isWin ? 1 : 0, isWin ? 1.0 : 0.0,
+                                   static_cast<int8_t>(isWin ? -1 : 0)});
             }
             return targets;
         }
@@ -693,17 +694,19 @@ std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int 
     for (const Move& move : legalMoves)
     {
         int visits = 0;
+        int8_t proven = 0;
         for (MCTSNode* child : root.children)
         {
             if (child->move.Piece == move.Piece && child->move.Destination == move.Destination)
             {
                 visits = child->visitCount;
+                proven = child->provenResult;
                 break;
             }
         }
 
         double pi = totalVisits > 0 ? static_cast<double>(visits) / static_cast<double>(totalVisits) : 0.0;
-        targets.push_back({move, visits, pi});
+        targets.push_back({move, visits, pi, proven});
     }
 
     return targets;

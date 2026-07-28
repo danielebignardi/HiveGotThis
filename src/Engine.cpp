@@ -521,21 +521,6 @@ void Engine::CommandFeatures()
     WriteOk();
 }
 
-// Indice del pezzo tra i nodi del grafo di BoardEncoder: i nodi sono i pezzi
-// in gioco, nell'ordine dell'enum PieceName (stesso contratto di encode()).
-// -1 se il pezzo non e' sulla board (piazzamento) o non e' valido.
-static int NodeIndexOf(const Board& board, PieceName piece)
-{
-    if (piece == PieceName::INVALID || !board.PieceInPlay(piece))
-        return -1;
-
-    int index = 0;
-    for (int i = 0; i < static_cast<int>(piece); ++i)
-        if (board.PieceInPlay(static_cast<PieceName>(i)))
-            ++index;
-    return index;
-}
-
 void Engine::CommandPolicyTargets(const std::string& param)
 {
     std::vector<std::string> tokens = Split(param);
@@ -634,47 +619,8 @@ void Engine::WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, in
         ss << "\"visits\":" << target.visitCount << ",";
         ss << "\"pi\":" << target.pi << ",";
         ss << "\"features\":" << MoveFeaturesToJson(EncodeMoveFeatures(*m_board, target.move)) << ",";
-
-        // Descrizione strutturale della mossa in termini di nodi del grafo,
-        // per una futura policy sugli embedding dei nodi (v. doc §10):
-        //   src = indice nodo del pezzo mosso (-1 = piazzamento o pass);
-        //   dst = vicini occupati della destinazione, coppie [nodo, slot
-        //         direzione dal vicino VERSO la destinazione]; slot 6 (up)
-        //         = la destinazione e' in cima a quel pezzo (salita).
-        // Il pezzo mosso non compare mai in dst: dopo la mossa non e' piu'
-        // nella cella di partenza (se sotto ha un altro pezzo, vale quello).
-        ss << "\"src\":" << (target.move == PassMove ? -1 : NodeIndexOf(*m_board, target.move.Piece)) << ",";
-        ss << "\"dst\":[";
-        if (!(target.move == PassMove))
-        {
-            Index dest = target.move.Destination;
-            bool first = true;
-            PieceName onTop = m_board->GetPieceAt(dest);
-            if (onTop != PieceName::INVALID)
-            {
-                ss << "[" << NodeIndexOf(*m_board, onTop) << "," << GNNSlotUp << "]";
-                first = false;
-            }
-            else
-            {
-                for (int d = 0; d < 6; ++d)
-                {
-                    Index nb = GetNeighborAt(dest, static_cast<Direction>(d));
-                    if (!IsValidIndex(nb)) continue;
-
-                    PieceName np = m_board->GetPieceAt(nb);
-                    if (np == target.move.Piece)
-                        np = m_board->GetPieceUnder(np);
-                    if (np == PieceName::INVALID) continue;
-
-                    if (!first) ss << ",";
-                    ss << "[" << NodeIndexOf(*m_board, np) << ","
-                       << static_cast<int>(Opposite(static_cast<Direction>(d))) << "]";
-                    first = false;
-                }
-            }
-        }
-        ss << "]}";
+        ss << MoveStructuralJson(*m_board, target.move);
+        ss << "}";
     }
 
     ss << "]}";

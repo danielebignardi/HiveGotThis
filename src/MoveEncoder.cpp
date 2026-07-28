@@ -1,4 +1,5 @@
 #include "MoveEncoder.h"
+#include "BoardEncoder.h" // GNNSlotUp: slot direzione "salita" negli edge del grafo
 
 #include <algorithm>
 #include <cmath>
@@ -178,6 +179,59 @@ std::string MoveFeaturesToJson(const std::vector<float>& features)
         if (i > 0) ss << ",";
         ss << features[i];
     }
+    ss << "]";
+    return ss.str();
+}
+
+int GraphNodeIndex(const Board& board, PieceName piece)
+{
+    if (piece == PieceName::INVALID || !board.PieceInPlay(piece))
+        return -1;
+
+    int index = 0;
+    for (int i = 0; i < static_cast<int>(piece); ++i)
+        if (board.PieceInPlay(static_cast<PieceName>(i)))
+            ++index;
+    return index;
+}
+
+std::string MoveStructuralJson(const Board& board, const Move& move)
+{
+    std::ostringstream ss;
+    ss << "\"src\":" << (move == PassMove ? -1 : GraphNodeIndex(board, move.Piece));
+    ss << ",\"dst\":[";
+
+    if (!(move == PassMove))
+    {
+        Index dest = move.Destination;
+        bool first = true;
+
+        PieceName onTop = board.GetPieceAt(dest);
+        if (onTop != PieceName::INVALID)
+        {
+            ss << "[" << GraphNodeIndex(board, onTop) << "," << GNNSlotUp << "]";
+            first = false;
+        }
+        else
+        {
+            for (int d = 0; d < 6; ++d)
+            {
+                Index nb = GetNeighborAt(dest, static_cast<Direction>(d));
+                if (!IsValidIndex(nb)) continue;
+
+                PieceName np = board.GetPieceAt(nb);
+                if (np == move.Piece)
+                    np = board.GetPieceUnder(np);
+                if (np == PieceName::INVALID) continue;
+
+                if (!first) ss << ",";
+                ss << "[" << GraphNodeIndex(board, np) << ","
+                   << static_cast<int>(Opposite(static_cast<Direction>(d))) << "]";
+                first = false;
+            }
+        }
+    }
+
     ss << "]";
     return ss.str();
 }
