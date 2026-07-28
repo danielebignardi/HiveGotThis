@@ -84,6 +84,10 @@ private:
     // "features" - Esporta le graph features della board corrente in JSON.
     void CommandFeatures();
 
+    // "policytargets depth N" - Esporta feature board + mosse legali con
+    // move_features e pi derivato dalle visite MCTS alla radice.
+    void CommandPolicyTargets(const std::string& param);
+
     // "perft [depth]" - Conta le foglie dell'albero delle mosse fino a 'depth' a
     // partire dalla posizione corrente, stampando conteggio e tempo per ogni livello.
     // Utile come benchmark della generazione mosse da posizioni arbitrarie (non solo

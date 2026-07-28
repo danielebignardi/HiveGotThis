@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include <algorithm>
 
 // questi include servono solo per interagire con MzingaEngine
 #include <unistd.h>

@@ -1,6 +1,7 @@
 #include "Engine.h"
 #include "Evaluation.h"
 #include "BoardEncoder.h"
+#include "MoveEncoder.h"
 #include "MCTS.h"
 
 #include <iostream>
@@ -10,9 +11,31 @@
 #include <chrono>
 #include <cstring>
 #include <cstdio>
+#include <iomanip>
 
 namespace HiveGotThis
 {
+
+namespace
+{
+std::string JsonEscape(const std::string& s)
+{
+    std::ostringstream out;
+    for (char c : s)
+    {
+        switch (c)
+        {
+            case '\\': out << "\\\\"; break;
+            case '"':  out << "\\\""; break;
+            case '\n': out << "\\n";  break;
+            case '\r': out << "\\r";  break;
+            case '\t': out << "\\t";  break;
+            default:   out << c;      break;
+        }
+    }
+    return out.str();
+}
+}
 
 // =============================================================================
 // COSTRUTTORE
@@ -115,6 +138,15 @@ void Engine::Run()
             else
                 CommandFeatures();
         }
+        else if (command == CommandString_PolicyTargets)
+        {
+            if (m_board == nullptr)
+                WriteError(ErrorMessage_NoGameInProgress);
+            else if (GameIsOver(m_board->GetBoardState()))
+                WriteError(ErrorMessage_GameIsOver);
+            else
+                CommandPolicyTargets(param);
+        }
         else if (command == CommandString_Perft)
         {
             if (m_board == nullptr)
@@ -152,7 +184,7 @@ void Engine::CommandNewGame(const std::string& param)
 {
     ResetGame();
 
-    GameType gt = GameType::Base; // Default: partita base senza espansioni
+    GameType gt = GameType::BaseMLP; // Default torneo: Base + Mosquito + Ladybug + Pillbug
 
     if (!param.empty())
     {
@@ -219,7 +251,7 @@ void Engine::CommandNewGame(const std::string& param)
     }
     else
     {
-        // Nessun parametro: partita base standard
+        // Nessun parametro: default torneo con tutte le espansioni
         m_board = new Board(gt);
         // m_board->StartGame(); // BUG UHP: setterebbe InProgress su una board vuota (0 mosse); deve restare NotStarted
     }
@@ -486,6 +518,58 @@ void Engine::CommandFeatures()
 {
     GNNGraph graph = BoardEncoder::encode(*m_board);
     std::cout << GNNGraphToJson(graph) << "\n";
+    WriteOk();
+}
+
+void Engine::CommandPolicyTargets(const std::string& param)
+{
+    int depth = 1;
+    std::vector<std::string> tokens = Split(param);
+    if (tokens.size() >= 2 && tokens[0] == "depth")
+        depth = std::max(1, std::stoi(tokens[1]));
+    else if (tokens.size() == 1 && !tokens[0].empty())
+        depth = std::max(1, std::stoi(tokens[0]));
+
+    int iterations = depth * 1000;
+    std::vector<PolicyTarget> targets = MCTS::SearchPolicyTargets(*m_board, iterations);
+    GNNGraph graph = BoardEncoder::encode(*m_board);
+
+    const PolicyTarget* best = nullptr;
+    for (const PolicyTarget& target : targets)
+    {
+        if (best == nullptr || target.visitCount > best->visitCount)
+            best = &target;
+    }
+
+    std::string graphJson = GNNGraphToJson(graph);
+    if (!graphJson.empty() && graphJson.back() == '}')
+        graphJson.pop_back();
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6);
+    ss << graphJson;
+    ss << ",\"turn\":\"" << JsonEscape(GetEnumString(m_board->currentColor)) << "\"";
+    ss << ",\"turn_index\":" << m_board->GetCurrentTurn();
+    ss << ",\"move_feature_dim\":" << MoveFeatureDim;
+    ss << ",\"mcts_iterations\":" << iterations;
+    ss << ",\"best_move\":\"" << JsonEscape(best ? MoveToMoveString(best->move) : PassMoveString) << "\"";
+    ss << ",\"moves\":[";
+
+    for (size_t i = 0; i < targets.size(); ++i)
+    {
+        const PolicyTarget& target = targets[i];
+        if (i > 0)
+            ss << ",";
+        ss << "{";
+        ss << "\"move\":\"" << JsonEscape(MoveToMoveString(target.move)) << "\",";
+        ss << "\"visits\":" << target.visitCount << ",";
+        ss << "\"pi\":" << target.pi << ",";
+        ss << "\"features\":" << MoveFeaturesToJson(EncodeMoveFeatures(*m_board, target.move));
+        ss << "}";
+    }
+
+    ss << "]}";
+    std::cout << ss.str() << "\n";
     WriteOk();
 }
 

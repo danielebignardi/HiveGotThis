@@ -25,6 +25,7 @@ constexpr const char *CommandString_Pass = "pass";
 constexpr const char *CommandString_Undo = "undo";
 constexpr const char *CommandString_Options = "options";
 constexpr const char *CommandString_Features = "features";
+constexpr const char *CommandString_PolicyTargets = "policytargets";
 
 constexpr const char *CommandString_Perft = "perft";
 constexpr const char *CommandString_Exit = "exit";

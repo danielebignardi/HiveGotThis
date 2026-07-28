@@ -604,4 +604,69 @@ Move MCTS::SearchIterations(const Board& rootBoard, int maxIterations)
     return SelectBestMove(&root);
 }
 
+std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int maxIterations)
+{
+    std::vector<Move> legalMoves;
+    rootBoard.GetValidMoves(legalMoves);
+
+    std::vector<PolicyTarget> targets;
+    targets.reserve(legalMoves.size());
+
+    if (legalMoves.empty())
+        return targets;
+
+    if (legalMoves.size() == 1)
+    {
+        targets.push_back({legalMoves[0], 1, 1.0});
+        return targets;
+    }
+
+    Color rootColor = rootBoard.currentColor;
+    for (const Move& move : legalMoves)
+    {
+        if (IsInstantWin(rootBoard, move, rootColor))
+        {
+            for (const Move& candidate : legalMoves)
+            {
+                bool isWin = candidate.Piece == move.Piece && candidate.Destination == move.Destination;
+                targets.push_back({candidate, isWin ? 1 : 0, isWin ? 1.0 : 0.0});
+            }
+            return targets;
+        }
+    }
+
+    MCTSNode root(PassMove, nullptr);
+    root.visitCount = 1;
+    TranspositionTable& tt = GetPersistentTranspositionTable();
+
+    for (int i = 0; i < maxIterations; ++i)
+    {
+        RunIteration(&root, rootBoard, tt);
+        if (root.provenResult != 0)
+            break;
+    }
+
+    int totalVisits = 0;
+    for (MCTSNode* child : root.children)
+        totalVisits += child->visitCount;
+
+    for (const Move& move : legalMoves)
+    {
+        int visits = 0;
+        for (MCTSNode* child : root.children)
+        {
+            if (child->move.Piece == move.Piece && child->move.Destination == move.Destination)
+            {
+                visits = child->visitCount;
+                break;
+            }
+        }
+
+        double pi = totalVisits > 0 ? static_cast<double>(visits) / static_cast<double>(totalVisits) : 0.0;
+        targets.push_back({move, visits, pi});
+    }
+
+    return targets;
+}
+
 } // namespace HiveGotThis

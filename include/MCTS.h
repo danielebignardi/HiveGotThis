@@ -12,6 +12,13 @@ namespace HiveGotThis
 
 class TorchScriptValueEvaluator; // definita in NeuralEvaluator.h
 
+struct PolicyTarget
+{
+    Move move;
+    int visitCount;
+    double pi;
+};
+
 // =============================================================================
 // TRANSPOSITION TABLE
 // =============================================================================
@@ -90,6 +97,10 @@ class MCTS
 public:
     static Move Search(const Board& rootBoard, int timeLimitMs);
     static Move SearchIterations(const Board& rootBoard, int maxIterations);
+
+    // Esegue una ricerca a iterazioni fisse e restituisce, per ogni mossa legale
+    // alla radice, la distribuzione policy target derivata dalle visite MCTS.
+    static std::vector<PolicyTarget> SearchPolicyTargets(const Board& rootBoard, int maxIterations);
 
     // Deve essere impostata prima di chiamare Search/SearchIterations: l'MCTS
     // valuta le foglie sempre con la value network, non esiste piu' un fallback
