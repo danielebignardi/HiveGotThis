@@ -17,8 +17,17 @@ struct Move
 
 static const Move PassMove{PieceName::INVALID, NullIndex, NullIndex};
 
-bool operator==(Move const &lhs, Move const &rhs);
-bool operator!=(Move const &lhs, Move const &rhs);
+inline bool operator==(Move const &lhs, Move const &rhs)
+{
+    return lhs.Piece == rhs.Piece &&
+           lhs.Source == rhs.Source &&
+           lhs.Destination == rhs.Destination;
+}
+
+inline bool operator!=(Move const &lhs, Move const &rhs)
+{
+    return !(lhs == rhs);
+}
 
 size_t hash(Move const &move);
 

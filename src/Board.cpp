@@ -37,13 +37,15 @@ static thread_local int dfsLow[BoardSize];
 // stato del pezzo (NullIndex se in mano, posizione attuale altrimenti) e non aggiunge
 // informazione. Deduplichiamo con un bitmap statico [NumPieceNames][BoardSize] ripristinato
 // solo nelle celle marcate, evitando il costo di un unordered_set a ogni chiamata.
-static void DedupMoves(std::vector<Move>& moves)
+static void DedupMoves(std::vector<Move>& moves, size_t start)
 {
     thread_local bool seen[NumPieceNames][BoardSize];
 
-    size_t write = 0;
-    for (const Move& m : moves)
+    size_t write = start;
+    for (size_t read = start; read < moves.size(); ++read)
     {
+        const Move& m = moves[read];
+
         // PassMove ha Destination invalida: arriva solo quando moves era vuoto,
         // quindi non collide con nulla. La lasciamo passare senza marcarla.
         if (!IsValidIndex(m.Destination)) { moves[write++] = m; continue; }
@@ -54,7 +56,7 @@ static void DedupMoves(std::vector<Move>& moves)
         moves[write++] = m;
     }
     // Reset mirato: tocchiamo solo le celle che abbiamo davvero marcato.
-    for (size_t i = 0; i < write; ++i)
+    for (size_t i = start; i < write; ++i)
     {
         const Move& m = moves[i];
         if (IsValidIndex(m.Destination)) seen[m.Piece][m.Destination] = false;
@@ -886,14 +888,16 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     PieceName queen = (currentColor == Color::White) ? PieceName::wQ : PieceName::bQ;   // chi è la regina in questione a seconda del turno
     bool queenInPlay = PieceInPlay(queen);
     int queenDeadline = (currentColor == Color::White) ? 6 : 7;             // turno entro il quale la regina in questione deve essere piazzata
-    bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline); 
-
-    thread_local std::vector<Index> positions; // buffer riusato per worker
-    positions.clear();
-    GetValidPlacements(currentColor, positions);
+    bool mustPlaceQueen = !queenInPlay && (currentTurn >= queenDeadline);
+    const int firstPiece = static_cast<int>(queen);
+    const int endPiece = firstPiece + NumPieceNames / 2;
 
     if (mustPlaceQueen)
     {
+        thread_local std::vector<Index> positions; // buffer riusato per worker
+        positions.clear();
+        GetValidPlacements(currentColor, positions);
+
         for (Index dest : positions)
             moves.push_back({queen, NullIndex, dest});
         return;
@@ -902,12 +906,11 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     // Quali pezzi in mano sono piazzabili NON dipende dalla posizione di destinazione:
     // lo calcoliamo una volta sola, poi per ogni cella valida emettiamo la lista.
     // (Prima questo filtro O(NumPieceNames) girava per OGNI destinazione.)
-    thread_local PieceName placeable[NumPieceNames];
+    PieceName placeable[NumPieceNames / 2];
     int nPlaceable = 0;
-    for (int p = 0; p < NumPieceNames; p++)
+    for (int p = firstPiece; p < endPiece; ++p)
     {
         PieceName piece = static_cast<PieceName>(p);
-        if (GetColor(piece) != currentColor) continue;
         if (!PieceInHand(piece)) continue;
         if (!PieceNameIsEnabledForGameType(piece, gameType)) continue;
 
@@ -927,18 +930,26 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
     }
 
     // Piazzamento: combina ogni posizione valida con ogni pezzo piazzabile
-    for (Index dest : positions)
-        for (int k = 0; k < nPlaceable; k++)
-            moves.push_back({placeable[k], NullIndex, dest});
+    if (nPlaceable > 0)
+    {
+        thread_local std::vector<Index> positions; // buffer riusato per worker
+        positions.clear();
+        GetValidPlacements(currentColor, positions);
+
+        for (Index dest : positions)
+            for (int k = 0; k < nPlaceable; k++)
+                moves.push_back({placeable[k], NullIndex, dest});
+    }
+
+    const size_t movementStart = moves.size();
 
     // Movimento: per ogni pezzo in gioco del colore corrente
     // La Regina deve essere in gioco per poter muovere altri pezzi
     if (queenInPlay)
     {
-        for (int p = 0; p < NumPieceNames; p++)
+        for (int p = firstPiece; p < endPiece; ++p)
         {
             PieceName piece = static_cast<PieceName>(p);
-            if (GetColor(piece) != currentColor) continue;
             if (!PieceInPlay(piece)) continue;
             if (!PieceIsOnTop(piece)) continue;
             if (cannotBeMoved[piece]) continue;
@@ -959,10 +970,14 @@ void Board::GetValidMoves(std::vector<Move>& moves) const
         }
     }
 
-    // Rimuove i duplicati residui (lancio del Pillbug che coincide con la mossa
-    // normale del pezzo lanciato, due Pillbug-attori che lanciano lo stesso pezzo
-    // nella stessa cella, ecc.).
-    DedupMoves(moves);
+    // I duplicati globali possono nascere solo dall'abilita' del Pillbug:
+    // un lancio puo' coincidere con una mossa normale o con il lancio di un altro
+    // Pillbug. Gli altri generatori producono coppie (Piece, Destination) uniche;
+    // la Mosquito deduplica gia' internamente le proprie destinazioni. Piazzamenti
+    // e movimenti non possono collidere, quindi elaboriamo soltanto la coda mobile.
+    const bool pillbugInPlay = PieceInPlay(PieceName::wP) || PieceInPlay(PieceName::bP);
+    if (pillbugInPlay)
+        DedupMoves(moves, movementStart);
 
     // Se non ci sono mosse valide, l'unica opzione è passare
     if (moves.empty())
@@ -1025,22 +1040,62 @@ void Board::GetValidPlacements(Color color, std::vector<Index>& positions) const
     // visited marca le celle candidate già aggiunte, per non duplicarle.
     BeginVisit();
 
-    // Per ogni pezzo sulla board, le sue celle vuote adiacenti sono candidate al piazzamento.
-    for (int p = 0; p < NumPieceNames; p++)
+    // Al turno 1 il Nero deve semplicemente toccare il primo pezzo bianco.
+    if (currentTurn == 1)
     {
-        if (PieceInHand(static_cast<PieceName>(p))) continue; // solo pezzi già sulla board
+        for (int p = 0; p < NumPieceNames; ++p)
+        {
+            PieceName piece = static_cast<PieceName>(p);
+            if (!PieceIsOnTop(piece)) continue;
+
+            Index pos = piecesPositions[p];
+            for (int offset : NeighborOffsets)
+            {
+                Index candidate = pos + offset;
+                if (!IsValidIndex(candidate) || HasPieceAt(candidate)) continue;
+                if (visited[candidate] == visitEpoch) continue;
+
+                visited[candidate] = visitEpoch;
+                positions.push_back(candidate);
+            }
+        }
+        return;
+    }
+
+    // Dal turno 2 generiamo candidati soltanto dai pezzi amici visibili.
+    // Il contatto amico e' quindi implicito: resta da escludere un avversario.
+    const int firstPiece = (color == Color::White)
+        ? static_cast<int>(PieceName::wQ)
+        : static_cast<int>(PieceName::bQ);
+    const int endPiece = firstPiece + NumPieceNames / 2;
+
+    for (int p = firstPiece; p < endPiece; ++p)
+    {
+        PieceName piece = static_cast<PieceName>(p);
+        if (!PieceIsOnTop(piece)) continue;
 
         Index pos = piecesPositions[p];
-
-        for (int i = 0; i < 6; i++)
+        for (int offset : NeighborOffsets)
         {
-            Index neighbor = pos + NeighborOffsets[i];
-            if (!IsValidIndex(neighbor)) continue;
-            if (visited[neighbor] == visitEpoch) continue;
-            if (!CanPlaceAt(neighbor, color, currentTurn)) continue;
+            Index candidate = pos + offset;
+            if (!IsValidIndex(candidate) || HasPieceAt(candidate)) continue;
+            if (visited[candidate] == visitEpoch) continue;
+            visited[candidate] = visitEpoch;
 
-            visited[neighbor] = visitEpoch;
-            positions.push_back(neighbor);
+            bool touchesOpponent = false;
+            for (int neighborOffset : NeighborOffsets)
+            {
+                Index neighbor = candidate + neighborOffset;
+                if (!IsValidIndex(neighbor) || !HasPieceAt(neighbor)) continue;
+                if (GetColor(GetPieceAt(neighbor)) != color)
+                {
+                    touchesOpponent = true;
+                    break;
+                }
+            }
+
+            if (!touchesOpponent)
+                positions.push_back(candidate);
         }
     }
 }

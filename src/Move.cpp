@@ -29,16 +29,6 @@ std::ostream& operator<<(std::ostream& os, const Move& move)
     return os;
 }
 
-bool operator==(Move const &lhs, Move const &rhs)
-{
-    return lhs.Piece == rhs.Piece && lhs.Source == rhs.Source && lhs.Destination == rhs.Destination;
-}
-
-bool operator!=(Move const &lhs, Move const &rhs)
-{
-    return !(lhs == rhs);
-}
-
 size_t hash(Move const &move)
 {
     size_t h = 0;

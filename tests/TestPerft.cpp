@@ -7,15 +7,19 @@
 //   TestPerft <maxDepth>      -> perft fino a maxDepth
 //   TestPerft <maxDepth> <gt> -> usa GameType <gt> (Base, Base+M, Base+L,
 //                               Base+P, Base+ML, Base+MP, Base+LP, Base+MLP)
+//   TestPerft <maxDepth> <gt> parallel -> parallelizza le mosse alla radice
 
 #include "Board.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace HiveGotThis;
@@ -30,7 +34,7 @@ static uint64_t Perft(Board& board, int depth)
     // ricorsione scende sempre a depth-1 (buffer diverso), quindi il buffer del
     // livello corrente resta valido mentre lo iteriamo. La pool cresce solo al primo
     // ingresso a ciascuna profondità, mai durante la ricorsione: la reference è stabile.
-    static std::vector<std::vector<Move>> pool;
+    static thread_local std::vector<std::vector<Move>> pool;
     if (static_cast<int>(pool.size()) <= depth) pool.resize(depth + 1);
     std::vector<Move>& moves = pool[depth];
     moves.clear();
@@ -49,6 +53,91 @@ static uint64_t Perft(Board& board, int depth)
         nodes += Perft(board, depth - 1);
         board.UndoMove(m, undo);
     }
+    return nodes;
+}
+
+static uint64_t PerftParallel(const Board& board, int depth)
+{
+    if (depth < 5)
+    {
+        Board copy = board;
+        return Perft(copy, depth);
+    }
+
+    std::vector<Move> rootMoves;
+    board.GetValidMoves(rootMoves);
+    const unsigned hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    if (hardwareThreads == 1)
+    {
+        Board copy = board;
+        return Perft(copy, depth);
+    }
+
+    struct PerftTask
+    {
+        Move first;
+        Move second;
+        bool hasSecond;
+    };
+
+    std::vector<PerftTask> tasks;
+    const bool splitTwoPlies = depth >= 6 && hardwareThreads > rootMoves.size();
+    if (splitTwoPlies)
+    {
+        for (const Move& first : rootMoves)
+        {
+            Board child = board;
+            child.ApplyMove(first);
+
+            std::vector<Move> secondMoves;
+            child.GetValidMoves(secondMoves);
+            for (const Move& second : secondMoves)
+                tasks.push_back({first, second, true});
+        }
+    }
+    else
+    {
+        tasks.reserve(rootMoves.size());
+        for (const Move& first : rootMoves)
+            tasks.push_back({first, PassMove, false});
+    }
+
+    const unsigned workerCount = std::min<unsigned>(
+        hardwareThreads, static_cast<unsigned>(tasks.size()));
+
+    std::atomic<size_t> nextMove{0};
+    std::vector<uint64_t> partial(workerCount, 0);
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+
+    for (unsigned worker = 0; worker < workerCount; ++worker)
+    {
+        workers.emplace_back([&, worker]()
+        {
+            uint64_t localNodes = 0;
+            while (true)
+            {
+                const size_t index = nextMove.fetch_add(1, std::memory_order_relaxed);
+                if (index >= tasks.size()) break;
+
+                Board child = board;
+                child.ApplyMove(tasks[index].first);
+                if (tasks[index].hasSecond)
+                    child.ApplyMove(tasks[index].second);
+
+                const int remainingDepth = depth - (tasks[index].hasSecond ? 2 : 1);
+                localNodes += Perft(child, remainingDepth);
+            }
+            partial[worker] = localNodes;
+        });
+    }
+
+    for (std::thread& worker : workers)
+        worker.join();
+
+    uint64_t nodes = 0;
+    for (uint64_t count : partial)
+        nodes += count;
     return nodes;
 }
 
@@ -78,6 +167,7 @@ int main(int argc, char** argv)
 
     int      maxDepth = (argc >= 2) ? std::atoi(argv[1]) : 4;
     GameType gameType = (argc >= 3) ? GetGameTypeValue(argv[2]) : GameType::BaseMLP;
+    bool parallel = (argc >= 4) && std::string(argv[3]) == "parallel";
     if (gameType == GameType::INVALID) gameType = GameType::BaseMLP;
 
     Board board(gameType);
@@ -93,7 +183,7 @@ int main(int argc, char** argv)
         int      turnBefore = board.GetCurrentTurn();
 
         auto t0 = std::chrono::steady_clock::now();
-        uint64_t nodes = Perft(board, d);
+        uint64_t nodes = parallel ? PerftParallel(board, d) : Perft(board, d);
         auto t1 = std::chrono::steady_clock::now();
 
         double ms  = std::chrono::duration<double, std::milli>(t1 - t0).count();
