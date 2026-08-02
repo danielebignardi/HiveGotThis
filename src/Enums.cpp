@@ -204,16 +204,6 @@ GameType GetGameTypeValue(const char *str)
     return GameType::INVALID;
 }
 
-bool GameInProgress(BoardState const &value)
-{
-    return (value == BoardState::NotStarted || value == BoardState::InProgress);
-}
-
-bool GameIsOver(BoardState const &value)
-{
-    return !GameInProgress(value);
-}
-
 // GetColor, GetBugType e PieceNameIsEnabledForGameType sono definite inline in Enums.h
 // (chiamate nei loop caldi della generazione mosse: vanno inlineate cross-TU).
 

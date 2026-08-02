@@ -1,17 +1,16 @@
-// Generatore di dati self-play (versione minima, single-process).
+// Generatore di dati self-play parallelo.
 //
-// Gioca N partite del motore contro se stesso (entrambi i colori usano la
-// stessa value network e la stessa transposition table persistente - in
-// self-play condividerla e' corretto: stessa rete, stesse valutazioni) e
+// Gioca N partite del motore contro se stesso. Tutti i worker usano la stessa
+// value network; ogni worker possiede una transposition table thread-local e
+// la riusa tra i turni e le partite che gli vengono assegnate. Il coordinatore
+// dell'evaluator aggrega sulla GPU richieste provenienti da partite diverse.
 // scrive una riga JSON per ogni posizione incontrata: feature della board da
 // BoardEncoder, label z, e i target di policy (le mosse legali con la
 // distribuzione pi delle visite MCTS alla radice, piu' move_features e
 // descrizione strutturale src/dst da MoveEncoder).
 //
-// Giocare piu' partite nello stesso processo evita di ricaricare il modello
-// ad ogni partita e mantiene calda la transposition table: partite successive
-// condividono molte posizioni (soprattutto in apertura) e i valori in cache
-// restano validi, essendo funzione solo di (board, pesi della rete).
+// Giocare piu' partite nello stesso processo evita di ricaricare il modello e
+// permette a CPU e GPU di lavorare contemporaneamente.
 //
 // Formato output (JSONL, una riga per posizione, append al file esistente):
 //   {"game_id":0,"ply":12,"side_to_move":"White","z":1,
@@ -33,13 +32,13 @@
 // viene mai campionata (se esiste un'alternativa).
 //
 // Uso:
-//   SelfPlay <model.pt> <output.jsonl> [iterations] [maxPlies] [seed] [tempPlies] [game_id] [numGames]
+//   SelfPlay <model.pt> <output.jsonl> [iterations] [maxPlies] [seed] [tempPlies] [game_id] [numGames] [device] [workers] [inferenceBatch] [batchWaitUs]
 //   default: 400 iterazioni/mossa, 200 ply massimi, seed casuale, 10 ply di
-//   temperatura, game_id 0, 1 partita
+//   temperatura, game_id 0, 1 partita, device auto, un worker per core.
 //
-// La partita i-esima del lotto usa seed+i e game_id+i: cosi' ogni singola
-// partita resta riproducibile da sola rilanciando con numGames=1 e i valori
-// corrispondenti.
+// La partita i-esima usa seed+i e game_id+i. Per riproducibilita' bit-a-bit
+// usare workers=1 e inferenceBatch=1: batch GPU diversi possono introdurre
+// minime differenze floating point e quindi cambiare una scelta al limite.
 
 #include "Board.h"
 #include "BoardEncoder.h"
@@ -47,14 +46,20 @@
 #include "MoveEncoder.h"
 #include "NeuralEvaluator.h"
 
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace HiveGotThis;
@@ -66,6 +71,12 @@ struct PositionRecord
     std::string movesJson;   // target policy: "moves":[{...},...]
     int ply;
     Color sideToMove;
+};
+
+struct GameResult
+{
+    std::string jsonl;
+    std::string summary;
 };
 
 // Frammento JSON '"moves":[...]' con i target di policy della posizione:
@@ -148,9 +159,10 @@ static size_t SampleTargetIndex(const std::vector<PolicyTarget>& targets, std::m
     return BestTargetIndex(targets); // non raggiungibile, per sicurezza
 }
 
-// Gioca una partita di self-play e scrive le sue posizioni su `out`.
-static void PlayOneGame(std::ofstream& out, long gameId, uint32_t seed,
-                        int iterations, int maxPlies, int tempPlies)
+// Gioca una partita completa. Ogni chiamata possiede board, albero MCTS e RNG;
+// il risultato viene restituito al writer principale, che mantiene l'ordine.
+static GameResult PlayOneGame(long gameId, uint32_t seed, int iterations,
+                              int maxPlies, int tempPlies)
 {
     std::mt19937 rng(seed);
 
@@ -197,36 +209,40 @@ static void PlayOneGame(std::ofstream& out, long gameId, uint32_t seed,
         return 0; // patta o partita troncata al tetto di mosse
     };
 
+    std::ostringstream gameJson;
     for (const PositionRecord& rec : records)
     {
         // Inserisce metadati e target policy in testa all'oggetto JSON
         // prodotto da GNNGraphToJson ({"x":...}), dopo la graffa di apertura.
-        out << "{\"game_id\":" << gameId
-            << ",\"ply\":" << rec.ply
-            << ",\"side_to_move\":\"" << (rec.sideToMove == Color::White ? "White" : "Black") << "\""
-            << ",\"z\":" << zFor(rec.sideToMove)
-            << "," << rec.movesJson
-            << "," << rec.graphJson.substr(1)
-            << "\n";
+        gameJson << "{\"game_id\":" << gameId
+                 << ",\"ply\":" << rec.ply
+                 << ",\"side_to_move\":\""
+                 << (rec.sideToMove == Color::White ? "White" : "Black") << "\""
+                 << ",\"z\":" << zFor(rec.sideToMove)
+                 << "," << rec.movesJson
+                 << "," << rec.graphJson.substr(1)
+                 << "\n";
     }
-    out.flush(); // ogni partita e' subito intera su disco
 
     const char* resultStr = "PlyCapReached";
     if (finalState == BoardState::WhiteWins)      resultStr = "WhiteWins";
     else if (finalState == BoardState::BlackWins) resultStr = "BlackWins";
     else if (finalState == BoardState::Draw)      resultStr = "Draw";
 
-    std::cerr << "Partita " << gameId << " terminata: " << resultStr
-              << " in " << ply << " ply (seed " << seed
-              << ", " << iterations << " iterazioni/mossa, "
-              << records.size() << " posizioni scritte)\n";
+    std::ostringstream summary;
+    summary << "Partita " << gameId << " terminata: " << resultStr
+            << " in " << ply << " ply (seed " << seed
+            << ", " << iterations << " iterazioni/mossa, "
+            << records.size() << " posizioni scritte)";
+
+    return {gameJson.str(), summary.str()};
 }
 
 int main(int argc, char** argv)
 {
     if (argc < 3)
     {
-        std::cerr << "Uso: SelfPlay <model.pt> <output.jsonl> [iterations] [maxPlies] [seed] [tempPlies] [game_id] [numGames]\n";
+        std::cerr << "Uso: SelfPlay <model.pt> <output.jsonl> [iterations] [maxPlies] [seed] [tempPlies] [game_id] [numGames] [device] [workers] [inferenceBatch] [batchWaitUs]\n";
         return 1;
     }
 
@@ -241,11 +257,27 @@ int main(int argc, char** argv)
     int      tempPlies    = (argc >= 7) ? std::atoi(argv[6]) : 10;
     long     gameId       = (argc >= 8) ? std::atol(argv[7]) : 0;
     int      numGames     = (argc >= 9) ? std::atoi(argv[8]) : 1;
+    std::string device    = (argc >= 10) ? argv[9] : "auto";
+    unsigned int hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    int      workers      = (argc >= 11) ? std::atoi(argv[10])
+                                         : std::min(numGames, static_cast<int>(hardwareThreads));
+    int      inferenceBatch = (argc >= 12) ? std::atoi(argv[11]) : workers;
+    int      batchWaitUs  = (argc >= 13) ? std::atoi(argv[12]) : 2000;
+
+    if (iterations < 1 || maxPlies < 1 || numGames < 1 || workers < 1
+        || inferenceBatch < 1 || batchWaitUs < 1)
+    {
+        std::cerr << "Errore: iterations, maxPlies, numGames, workers, "
+                     "inferenceBatch e batchWaitUs devono essere >= 1\n";
+        return 1;
+    }
+    workers = std::min(workers, numGames);
+    inferenceBatch = std::min(inferenceBatch, workers);
 
     std::unique_ptr<TorchScriptValueEvaluator> evaluator;
     try
     {
-        evaluator = std::make_unique<TorchScriptValueEvaluator>(modelPath);
+        evaluator = std::make_unique<TorchScriptValueEvaluator>(modelPath, device);
     }
     catch (const std::exception& e)
     {
@@ -253,7 +285,13 @@ int main(int argc, char** argv)
         return 1;
     }
     TorchScriptValueEvaluator::SetTorchThreads(1);
+    evaluator->EnableCrossGameBatching(inferenceBatch, batchWaitUs);
     MCTS::SetValueNetwork(evaluator.get());
+
+    std::cerr << "Inferenza su " << evaluator->GetDevice()
+              << ", " << workers << " partite concorrenti"
+              << ", batch condiviso fino a " << inferenceBatch
+              << " richieste (" << batchWaitUs << " us max)\n";
 
     std::ofstream out(outputPath, std::ios::app);
     if (!out)
@@ -262,9 +300,90 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    std::atomic<int> nextGame{0};
+    std::mutex resultMutex;
+    std::condition_variable resultReady;
+    std::vector<std::unique_ptr<GameResult>> results(static_cast<size_t>(numGames));
+    std::vector<std::exception_ptr> errors(static_cast<size_t>(numGames));
+    std::vector<bool> ready(static_cast<size_t>(numGames), false);
+    std::vector<std::thread> gameThreads;
+    gameThreads.reserve(static_cast<size_t>(workers));
+
+    for (int worker = 0; worker < workers; ++worker)
+    {
+        gameThreads.emplace_back([&]
+        {
+            while (true)
+            {
+                int index = nextGame.fetch_add(1);
+                if (index >= numGames)
+                    return;
+
+                std::unique_ptr<GameResult> result;
+                std::exception_ptr error;
+                try
+                {
+                    result = std::make_unique<GameResult>(
+                        PlayOneGame(gameId + index,
+                                    seed + static_cast<uint32_t>(index),
+                                    iterations, maxPlies, tempPlies));
+                }
+                catch (...)
+                {
+                    error = std::current_exception();
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(resultMutex);
+                    results[static_cast<size_t>(index)] = std::move(result);
+                    errors[static_cast<size_t>(index)] = error;
+                    ready[static_cast<size_t>(index)] = true;
+                }
+                resultReady.notify_all();
+            }
+        });
+    }
+
     for (int i = 0; i < numGames; ++i)
-        PlayOneGame(out, gameId + i, seed + static_cast<uint32_t>(i),
-                    iterations, maxPlies, tempPlies);
+    {
+        std::unique_ptr<GameResult> result;
+        std::exception_ptr error;
+        {
+            std::unique_lock<std::mutex> lock(resultMutex);
+            resultReady.wait(lock, [&ready, i]
+            {
+                return ready[static_cast<size_t>(i)];
+            });
+            result = std::move(results[static_cast<size_t>(i)]);
+            error = errors[static_cast<size_t>(i)];
+        }
+
+        if (result)
+        {
+            out << result->jsonl;
+            out.flush();
+            std::cerr << result->summary << "\n";
+        }
+        else if (error)
+        {
+            try
+            {
+                std::rethrow_exception(error);
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "Errore nella partita " << gameId + i
+                          << ": " << e.what() << "\n";
+            }
+        }
+    }
+
+    for (std::thread& thread : gameThreads)
+        thread.join();
+
+    for (const std::exception_ptr& error : errors)
+        if (error)
+            return 1;
 
     std::cerr << numGames << " partite completate, output in " << outputPath << "\n";
     return 0;

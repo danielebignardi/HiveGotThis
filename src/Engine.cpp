@@ -12,6 +12,8 @@
 #include <cstring>
 #include <cstdio>
 #include <iomanip>
+#include <atomic>
+#include <thread>
 
 namespace HiveGotThis
 {
@@ -633,7 +635,11 @@ static uint64_t PerftRec(Board& board, int depth)
 {
     if (depth == 0) return 1;
 
-    std::vector<Move> moves;
+    static thread_local std::vector<std::vector<Move>> pool;
+    if (static_cast<int>(pool.size()) <= depth) pool.resize(depth + 1);
+    std::vector<Move>& moves = pool[depth];
+    moves.clear();
+
     board.GetValidMoves(moves);
     if (depth == 1) return moves.size();
 
@@ -648,19 +654,120 @@ static uint64_t PerftRec(Board& board, int depth)
     return nodes;
 }
 
+static uint64_t PerftParallel(const Board& board, int depth)
+{
+    if (depth < 5)
+    {
+        Board copy = board;
+        return PerftRec(copy, depth);
+    }
+
+    std::vector<Move> rootMoves;
+    board.GetValidMoves(rootMoves);
+    const unsigned hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    if (hardwareThreads == 1)
+    {
+        Board copy = board;
+        return PerftRec(copy, depth);
+    }
+
+    struct PerftTask
+    {
+        Move first;
+        Move second;
+        bool hasSecond;
+    };
+
+    std::vector<PerftTask> tasks;
+    const bool splitTwoPlies = depth >= 6 && hardwareThreads > rootMoves.size();
+    if (splitTwoPlies)
+    {
+        for (const Move& first : rootMoves)
+        {
+            Board child = board;
+            child.ApplyMove(first);
+
+            std::vector<Move> secondMoves;
+            child.GetValidMoves(secondMoves);
+            for (const Move& second : secondMoves)
+                tasks.push_back({first, second, true});
+        }
+    }
+    else
+    {
+        tasks.reserve(rootMoves.size());
+        for (const Move& first : rootMoves)
+            tasks.push_back({first, PassMove, false});
+    }
+
+    const unsigned workerCount = std::min<unsigned>(
+        hardwareThreads, static_cast<unsigned>(tasks.size()));
+
+    std::atomic<size_t> nextMove{0};
+    std::vector<uint64_t> partial(workerCount, 0);
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+
+    for (unsigned worker = 0; worker < workerCount; ++worker)
+    {
+        workers.emplace_back([&, worker]()
+        {
+            uint64_t localNodes = 0;
+            while (true)
+            {
+                const size_t index = nextMove.fetch_add(1, std::memory_order_relaxed);
+                if (index >= tasks.size()) break;
+
+                Board child = board;
+                child.ApplyMove(tasks[index].first);
+                if (tasks[index].hasSecond)
+                    child.ApplyMove(tasks[index].second);
+
+                const int remainingDepth = depth - (tasks[index].hasSecond ? 2 : 1);
+                localNodes += PerftRec(child, remainingDepth);
+            }
+            partial[worker] = localNodes;
+        });
+    }
+
+    for (std::thread& worker : workers)
+        worker.join();
+
+    uint64_t nodes = 0;
+    for (uint64_t count : partial)
+        nodes += count;
+    return nodes;
+}
+
 void Engine::CommandPerft(const std::string& param)
 {
     int maxDepth = 4;
+    bool parallel = false;
     if (!param.empty())
     {
-        try { maxDepth = std::stoi(param); }
-        catch (...) { WriteError("Parametro perft non valido: " + param); return; }
+        std::istringstream input(param);
+        std::string mode;
+        if (!(input >> maxDepth) || maxDepth < 0)
+        {
+            WriteError("Parametro perft non valido: " + param);
+            return;
+        }
+        if (input >> mode)
+        {
+            if (mode != "parallel" || (input >> std::ws && !input.eof()))
+            {
+                WriteError("Parametro perft non valido: " + param);
+                return;
+            }
+            parallel = true;
+        }
     }
 
     for (int d = 1; d <= maxDepth; ++d)
     {
         auto t0 = std::chrono::steady_clock::now();
-        uint64_t nodes = PerftRec(*m_board, d);
+        uint64_t nodes = parallel ? PerftParallel(*m_board, d)
+                                  : PerftRec(*m_board, d);
         auto t1 = std::chrono::steady_clock::now();
 
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
