@@ -139,7 +139,7 @@ Una riga JSON per posizione (JSONL: ogni riga è un oggetto autonomo — se
 un'esecuzione si interrompe, al massimo si perde l'ultima riga):
 
 ```json
-{"game_id":3,"ply":12,"side_to_move":"White","z":1,
+{"game_id":3,"ply":12,"side_to_move":"White","z":1,"q":0.4137,
  "moves":[{"visits":37,"pi":0.0925,"features":[...],"src":3,"dst":[[0,2]]}, ...],
  "x":[...],"edge_index":[...],"edge_attr":[...],"u":[...]}
 ```
@@ -150,6 +150,13 @@ un'esecuzione si interrompe, al massimo si perde l'ultima riga):
   `u` = 21. Il training li rimodella con `view()`.
 - **`z`** — il label: esito finale dal punto di vista di chi muoveva. `+1`
   se ha poi vinto, `-1` se ha perso, `0` per patta o partita troncata.
+- **`q`** — il valore della radice MCTS in `[-1, 1]` side-to-move: la stima
+  della *ricerca* per la posizione (distillazione, stile bee-search). È
+  un'etichetta più densa di `z` (una partita vinta contiene anche mosse
+  pessime; la ricerca giudica la singola posizione). Il training la usa con
+  `--q-blend B`: target `(1-B)·z + B·q` dove `q` esiste; le posizioni senza
+  `q` (tutto il dataset umano) restano su `z`. Assente quando la ricerca non
+  ha statistiche (mossa singola obbligata).
 - **`moves`** — i target della policy head: una entry per mossa legale, con
   `pi` = frazione delle visite MCTS alla radice (la distribuzione che la
   policy impara a imitare), le 32 `features` di `MoveEncoder`, e la

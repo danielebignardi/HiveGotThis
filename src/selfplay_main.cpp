@@ -48,9 +48,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -71,6 +73,12 @@ struct PositionRecord
     std::string movesJson;   // target policy: "moves":[{...},...]
     int ply;
     Color sideToMove;
+    // Valore Q della radice MCTS in [-1, 1] side-to-move: la stima della
+    // ricerca per questa posizione. Target "q" di distillazione (blend con z
+    // via --q-blend del trainer). hasQ=false quando la ricerca non ha
+    // prodotto statistiche (mossa singola obbligata).
+    double q;
+    bool hasQ;
 };
 
 struct GameResult
@@ -179,10 +187,15 @@ static GameResult PlayOneGame(long gameId, uint32_t seed, int iterations,
 
         // La ricerca passa sempre da SearchPolicyTargets: stesso costo di
         // SearchIterations, ma espone la distribuzione delle visite alla
-        // radice - il target della policy head e la base del campionamento.
-        std::vector<PolicyTarget> targets = MCTS::SearchPolicyTargets(board, iterations);
+        // radice - il target della policy head e la base del campionamento -
+        // e il valore Q della radice, che diventa il target "q" di
+        // distillazione (la stima della ricerca e' un'etichetta piu' densa
+        // dell'esito finale z).
+        double rootQ = std::numeric_limits<double>::quiet_NaN();
+        std::vector<PolicyTarget> targets = MCTS::SearchPolicyTargets(board, iterations, &rootQ);
         if (targets.empty())
             break;
+        bool hasRootQ = !std::isnan(rootQ);
 
         // Registra la posizione che il giocatore di turno si trova davanti,
         // PRIMA di scegliere la mossa. La board vuota di ply 0 viene saltata:
@@ -191,7 +204,7 @@ static GameResult PlayOneGame(long gameId, uint32_t seed, int iterations,
         GNNGraph graph = BoardEncoder::encode(board);
         if (!graph.x.empty())
             records.push_back({GNNGraphToJson(graph), PolicyMovesJson(board, targets),
-                               ply, board.currentColor});
+                               ply, board.currentColor, rootQ, hasRootQ});
 
         size_t chosen = (ply < tempPlies) ? SampleTargetIndex(targets, rng)
                                           : BestTargetIndex(targets);
@@ -218,8 +231,10 @@ static GameResult PlayOneGame(long gameId, uint32_t seed, int iterations,
                  << ",\"ply\":" << rec.ply
                  << ",\"side_to_move\":\""
                  << (rec.sideToMove == Color::White ? "White" : "Black") << "\""
-                 << ",\"z\":" << zFor(rec.sideToMove)
-                 << "," << rec.movesJson
+                 << ",\"z\":" << zFor(rec.sideToMove);
+        if (rec.hasQ)
+            gameJson << ",\"q\":" << rec.q;
+        gameJson << "," << rec.movesJson
                  << "," << rec.graphJson.substr(1)
                  << "\n";
     }

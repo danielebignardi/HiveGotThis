@@ -113,7 +113,16 @@ public:
 
     // Esegue una ricerca a iterazioni fisse e restituisce, per ogni mossa legale
     // alla radice, la distribuzione policy target derivata dalle visite MCTS.
-    static std::vector<PolicyTarget> SearchPolicyTargets(const Board& rootBoard, int maxIterations);
+    //
+    // Se rootValue != nullptr viene riempito con il valore Q della radice in
+    // [-1, 1] dal punto di vista di chi muove: la media pesata sulle visite
+    // dei valori (negati, convenzione negamax) dei figli. E' la stima della
+    // ricerca per la posizione, usata dal SelfPlay come target "q" di
+    // distillazione (piu' denso e pulito dell'esito finale z). Resta
+    // invariato (non scritto) se la ricerca non produce statistiche: mossa
+    // singola obbligata o nessuna mossa legale.
+    static std::vector<PolicyTarget> SearchPolicyTargets(const Board& rootBoard, int maxIterations,
+                                                         double* rootValue = nullptr);
 
     // Deve essere impostata prima di chiamare Search/SearchIterations: l'MCTS
     // valuta le foglie sempre con la value network, non esiste piu' un fallback

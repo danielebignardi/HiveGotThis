@@ -6,6 +6,7 @@
 #include "Enums.h"
 #include "Constants.h"
 
+#include <limits>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -94,7 +95,10 @@ private:
     void CommandPolicyTargets(const std::string& param);
 
     // Emissione JSON condivisa dalle due forme di policytargets.
-    void WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, int iterations);
+    // rootQ: valore Q della radice MCTS in [-1, 1] side-to-move (target "q"
+    // di distillazione); NaN = non disponibile (nessuna ricerca), non emesso.
+    void WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, int iterations,
+                                double rootQ = std::numeric_limits<double>::quiet_NaN());
 
     // "perft [depth]" - Conta le foglie dell'albero delle mosse fino a 'depth' a
     // partire dalla posizione corrente, stampando conteggio e tempo per ogni livello.

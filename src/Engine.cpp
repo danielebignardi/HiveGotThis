@@ -7,6 +7,7 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
 #include <random>
 #include <chrono>
 #include <cstring>
@@ -582,11 +583,12 @@ void Engine::CommandPolicyTargets(const std::string& param)
         depth = std::max(1, std::stoi(tokens[0]));
 
     int iterations = depth * 1000;
-    std::vector<PolicyTarget> targets = MCTS::SearchPolicyTargets(*m_board, iterations);
-    WritePolicyTargetsJson(targets, iterations);
+    double rootQ = std::numeric_limits<double>::quiet_NaN();
+    std::vector<PolicyTarget> targets = MCTS::SearchPolicyTargets(*m_board, iterations, &rootQ);
+    WritePolicyTargetsJson(targets, iterations, rootQ);
 }
 
-void Engine::WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, int iterations)
+void Engine::WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, int iterations, double rootQ)
 {
     GNNGraph graph = BoardEncoder::encode(*m_board);
 
@@ -608,6 +610,8 @@ void Engine::WritePolicyTargetsJson(const std::vector<PolicyTarget>& targets, in
     ss << ",\"turn_index\":" << m_board->GetCurrentTurn();
     ss << ",\"move_feature_dim\":" << MoveFeatureDim;
     ss << ",\"mcts_iterations\":" << iterations;
+    if (!std::isnan(rootQ))
+        ss << ",\"q\":" << rootQ;
     ss << ",\"best_move\":\"" << JsonEscape(best ? MoveToMoveString(best->move) : PassMoveString) << "\"";
     ss << ",\"moves\":[";
 

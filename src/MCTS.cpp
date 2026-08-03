@@ -609,7 +609,8 @@ Move MCTS::SearchIterations(const Board& rootBoard, int maxIterations)
     return SelectBestMove(&root);
 }
 
-std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int maxIterations)
+std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int maxIterations,
+                                                    double* rootValue)
 {
     std::vector<Move> legalMoves;
     rootBoard.GetValidMoves(legalMoves);
@@ -637,6 +638,8 @@ std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int 
                 targets.push_back({candidate, isWin ? 1 : 0, isWin ? 1.0 : 0.0,
                                    static_cast<int8_t>(isWin ? -1 : 0)});
             }
+            if (rootValue != nullptr)
+                *rootValue = 1.0; // vittoria immediata: chi muove vince
             return targets;
         }
     }
@@ -653,8 +656,25 @@ std::vector<PolicyTarget> MCTS::SearchPolicyTargets(const Board& rootBoard, int 
     }
 
     int totalVisits = 0;
+    double totalChildValue = 0.0;
     for (MCTSNode* child : root.children)
+    {
         totalVisits += child->visitCount;
+        totalChildValue += child->totalValue;
+    }
+
+    // Q della radice per la distillazione (target "q" del SelfPlay).
+    // I figli accumulano totalValue nella LORO prospettiva (l'avversario di
+    // chi muove alla radice): la media pesata sulle visite va negata per
+    // tornare side-to-move (negamax). Se il solver ha provato la radice, il
+    // risultato esatto vale piu' della stima statistica.
+    if (rootValue != nullptr && totalVisits > 0)
+    {
+        if (root.provenResult != 0)
+            *rootValue = static_cast<double>(root.provenResult);
+        else
+            *rootValue = -totalChildValue / static_cast<double>(totalVisits);
+    }
 
     for (const Move& move : legalMoves)
     {
