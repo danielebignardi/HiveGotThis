@@ -44,6 +44,7 @@ import bisect
 import torch
 from torch_geometric.data import Batch, Data
 from torch_geometric.loader import DataLoader
+from torch_geometric.utils import scatter
 
 from hive_value_gnn import EDGE_IN_DIM, GLOBAL_DIM, MOVE_FEATURE_DIM, NODE_IN_DIM, HiveValueGNN, load_weights
 
@@ -106,12 +107,21 @@ def record_to_data(rec: dict, move_feature_dim: int) -> Data:
     y = torch.tensor([[float(rec["z"])]], dtype=torch.float32)  # [1,1] -> batcha a [B,1]
     move_features, policy_target, has_policy = read_policy_targets(rec, move_feature_dim)
 
+    # q opzionale: valore della radice MCTS in [-1, 1] side-to-move, emesso dal
+    # SelfPlay (distillazione della ricerca, stile bee-search). I dati umani
+    # BoardSpace non lo hanno: has_q=False e il target resta z.
+    q_raw = rec.get("q")
+    has_q = q_raw is not None
+    q = torch.tensor([[float(q_raw) if has_q else 0.0]], dtype=torch.float32)
+
     return Data(
         x=x,
         edge_index=edge_index,
         edge_attr=edge_attr,
         u=u,
         y=y,
+        q=q,
+        has_q=torch.tensor([has_q], dtype=torch.bool),
         move_features=move_features,
         policy_target=policy_target,
         has_policy=torch.tensor([has_policy], dtype=torch.bool),
@@ -266,10 +276,23 @@ class D6Augment(torch.utils.data.Dataset):
             edge_attr=d.edge_attr[:, D6_COLUMN_PERMS[k]],
             u=d.u,
             y=d.y,
+            q=d.q,
+            has_q=d.has_q,
             move_features=d.move_features,
             policy_target=d.policy_target,
             has_policy=d.has_policy,
         )
+
+
+def seed_augment_worker(_worker_id: int) -> None:
+    """worker_init_fn per --num-workers > 0: ogni worker del DataLoader riceve
+    una COPIA del dataset (fork), quindi senza reseed tutti i worker
+    partirebbero con lo stesso random.Random e produrrebbero simmetrie D6
+    correlate. torch.initial_seed() e' gia' distinto per worker (base seed +
+    worker_id), quindi basta reseedare il rng della copia locale."""
+    info = torch.utils.data.get_worker_info()
+    if info is not None and isinstance(info.dataset, D6Augment):
+        info.dataset.rng = random.Random(torch.initial_seed() % (2**32))
 
 
 def policy_loss_for_batch(model: HiveValueGNN, batch) -> torch.Tensor:
@@ -283,35 +306,77 @@ def policy_loss_for_batch(model: HiveValueGNN, batch) -> torch.Tensor:
         batch.move_features_batch,
     )
 
-    total = logits.new_tensor(0.0)
-    count = 0
-    for graph_id in torch.unique(batch.move_features_batch):
-        mask = batch.move_features_batch == graph_id
-        target = batch.policy_target[mask]
-        target_sum = target.sum()
-        if target.numel() == 0 or target_sum <= 0:
-            continue
-        target = target / target_sum
-        total = total - (target * torch.nn.functional.log_softmax(logits[mask], dim=0)).sum()
-        count += 1
+    # Versione originale (loop Python per grafo): sostituita dalla versione
+    # vettorizzata sotto, che fa le stesse identiche operazioni con scatter
+    # segmentati - sul profiling GPU il loop era uno dei colli di bottiglia
+    # CPU (una iterazione Python + 2 kernel per OGNI posizione del batch).
+    # Equivalenza verificata da scripts/tests/test_policy_loss.py.
+    #
+    # total = logits.new_tensor(0.0)
+    # count = 0
+    # for graph_id in torch.unique(batch.move_features_batch):
+    #     mask = batch.move_features_batch == graph_id
+    #     target = batch.policy_target[mask]
+    #     target_sum = target.sum()
+    #     if target.numel() == 0 or target_sum <= 0:
+    #         continue
+    #     target = target / target_sum
+    #     total = total - (target * torch.nn.functional.log_softmax(logits[mask], dim=0)).sum()
+    #     count += 1
+    #
+    # if count == 0:
+    #     return logits.new_tensor(0.0)
+    # return total / count
 
-    if count == 0:
+    idx = batch.move_features_batch
+    n_graphs = int(batch.y.size(0))
+
+    # log_softmax segmentato per grafo: shift col massimo del segmento
+    # (stabilita' numerica), poi log della somma esponenziale del segmento.
+    # detach: lo shift del massimo serve solo alla stabilita' numerica e si
+    # cancella analiticamente nel gradiente (stesso trucco di F.log_softmax).
+    seg_max = scatter(logits, idx, dim=0, dim_size=n_graphs, reduce="max").detach()
+    shifted = logits - seg_max.index_select(0, idx)
+    seg_sumexp = scatter(shifted.exp(), idx, dim=0, dim_size=n_graphs, reduce="sum")
+    log_softmax = shifted - seg_sumexp.clamp(min=1e-38).log().index_select(0, idx)
+
+    # Normalizzazione dei target per grafo; i grafi con somma <= 0 (nessun
+    # target valido) non contribuiscono, come nel loop originale.
+    target_sum = scatter(batch.policy_target, idx, dim=0, dim_size=n_graphs, reduce="sum")
+    valid = target_sum > 0
+    if not bool(valid.any()):
         return logits.new_tensor(0.0)
-    return total / count
+    norm_target = batch.policy_target / target_sum.clamp(min=1e-38).index_select(0, idx)
+
+    per_graph_ce = scatter(-norm_target * log_softmax, idx, dim=0, dim_size=n_graphs, reduce="sum")
+    return per_graph_ce[valid].mean()
 
 
-def batch_losses(model: HiveValueGNN, batch, policy_weight: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def value_target_for_batch(batch, q_blend: float) -> torch.Tensor:
+    """Target del value: z, oppure il blend (1-B)*z + B*q dove q (il valore
+    della radice MCTS, distillazione della ricerca) e' disponibile. Le
+    posizioni senza q (dati umani) restano su z puro anche con B > 0, quindi
+    i dataset misti funzionano senza conversioni."""
+    if q_blend <= 0.0:
+        return batch.y
+    has_q = batch.has_q.view(-1, 1).float()
+    return batch.y + q_blend * has_q * (batch.q - batch.y)
+
+
+def batch_losses(model: HiveValueGNN, batch, policy_weight: float, q_blend: float = 0.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
-    value_loss = torch.nn.functional.mse_loss(pred, batch.y)
+    value_loss = torch.nn.functional.mse_loss(pred, value_target_for_batch(batch, q_blend))
     policy_loss = policy_loss_for_batch(model, batch) if policy_weight > 0.0 else pred.new_tensor(0.0)
     return value_loss + policy_weight * policy_loss, value_loss, policy_loss
 
 
 @torch.no_grad()
-def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device, policy_weight: float) -> tuple[float, float, int, float]:
+def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device, policy_weight: float, q_blend: float = 0.0) -> tuple[float, float, int, float]:
     """Restituisce (MSE medio, accuratezza del segno sulle posizioni decisive,
     numero di posizioni decisive). "Decisive" = z != 0: li' il segno della
-    predizione dice se la rete indovina il vincitore."""
+    predizione dice se la rete indovina il vincitore. La MSE e' contro lo
+    stesso target (blended se --q-blend > 0) usato in training; il segno-ok
+    resta sempre contro z, per confrontare i run tra loro."""
     model.eval()
     total_loss = 0.0
     total_count = 0
@@ -323,7 +388,7 @@ def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device, poli
     for batch in loader:
         batch = batch_to_float32(batch.to(device))
         pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
-        total_loss += torch.nn.functional.mse_loss(pred, batch.y, reduction="sum").item()
+        total_loss += torch.nn.functional.mse_loss(pred, value_target_for_batch(batch, q_blend), reduction="sum").item()
         total_count += batch.y.size(0)
         if policy_weight > 0.0 and batch.move_features.numel() > 0:
             total_policy_loss += policy_loss_for_batch(model, batch).item()
@@ -350,8 +415,18 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--lr-schedule", choices=["none", "cosine"], default="none",
-                        help="cosine: decadimento coseno del learning rate da --lr a --lr/10 lungo --epochs. Un lr costante resta troppo alto nelle epoche finali e fa oscillare la validation attorno al minimo invece di scenderci")
+    parser.add_argument("--lr-schedule", choices=["none", "cosine", "plateau"], default="none",
+                        help="cosine: decadimento coseno del learning rate da --lr a --lr/10 lungo --epochs. Un lr costante resta troppo alto nelle epoche finali e fa oscillare la validation attorno al minimo invece di scenderci. plateau: dimezza il lr quando la validation non migliora da 10 epoche (ReduceLROnPlateau)")
+    parser.add_argument("--weight-decay", type=float, default=0.0,
+                        help="Regolarizzazione L2 di Adam (bee-search usa 1e-5). Default 0 = comportamento attuale")
+    parser.add_argument("--clip-grad", type=float, default=0.0,
+                        help="Clip della norma del gradiente (bee-search usa 1.0). Default 0 = disattivo")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Early stopping: ferma dopo N epoche senza un nuovo best su validation. Default 0 = disattivo. Sulle GPU a noleggio fa risparmiare le epoche di plateau")
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="Worker del DataLoader (0 = processo singolo, comportamento attuale). Su GPU con molti core conviene ~vCPU-2: la collation e il cast fp16->fp32 sono il collo di bottiglia CPU")
+    parser.add_argument("--q-blend", type=float, default=0.0,
+                        help="Blend del target value: (1-B)*z + B*q dove q (valore della radice MCTS) e' presente nel dataset. Le posizioni senza q restano su z. Default 0 = solo z")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Frazione di PARTITE (non posizioni) per la validation")
     parser.add_argument("--sample", type=float, default=1.0,
                         help="Frazione di posizioni da caricare (es. 0.4 se il dataset intero non sta in RAM)")
@@ -373,6 +448,14 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
+    # Con --num-workers > 0 i batch PyG viaggiano worker -> main come molti
+    # piccoli tensori; la strategia di default di torch su Linux passa UN file
+    # descriptor per tensore e con decine di worker si sfonda ulimit -n
+    # ("received 0 items of ancdata", visto sul primo run remoto). La
+    # strategia file_system passa percorsi in /dev/shm invece di fd.
+    if args.num_workers > 0 and sys.platform.startswith("linux"):
+        torch.multiprocessing.set_sharing_strategy("file_system")
+
     games = load_games(args.data, args.sample, args.seed, args.move_feature_dim)
     if not games:
         print("Nessuna posizione trovata nei file dati.", file=sys.stderr)
@@ -384,8 +467,16 @@ def main() -> None:
           f"({n_decisive} decisive) -> train {len(train_data)}, validation {len(val_data)}")
 
     train_set = D6Augment(train_data, args.seed) if args.augment else train_data
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, follow_batch=["move_features"])
-    val_loader = DataLoader(val_data, batch_size=args.batch_size, follow_batch=["move_features"]) if val_data else None
+    # Versione originale (num_workers=0 implicito): misurata GPU-starved sui
+    # run Kaggle (~1.000-1.400 posizioni/s su T4, GPU quasi ferma).
+    # train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, follow_batch=["move_features"])
+    # val_loader = DataLoader(val_data, batch_size=args.batch_size, follow_batch=["move_features"]) if val_data else None
+    loader_kwargs = dict(batch_size=args.batch_size, follow_batch=["move_features"])
+    if args.num_workers > 0:
+        loader_kwargs.update(num_workers=args.num_workers, pin_memory=True,
+                             persistent_workers=True, worker_init_fn=seed_augment_worker)
+    train_loader = DataLoader(train_set, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_data, **loader_kwargs) if val_data else None
 
     model = HiveValueGNN(
         hidden_dim=args.hidden_dim,
@@ -402,15 +493,21 @@ def main() -> None:
         load_weights(model, Path(args.init_weights), device)
         print(f"Pesi iniziali caricati da: {args.init_weights}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # T_max = --epochs anche se --max-hours ferma prima: il decadimento resta
     # piu' lento del previsto, che e' il difetto meno dannoso.
     scheduler = None
     if args.lr_schedule == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.epochs, eta_min=args.lr * 0.1)
+    elif args.lr_schedule == "plateau":
+        # Stessi parametri di bee-search: dimezza il lr dopo 10 epoche senza
+        # miglioramento della metrica di validation.
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, patience=10, factor=0.5)
 
     best_val = float("inf")
+    epochs_since_best = 0
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -438,8 +535,10 @@ def main() -> None:
         for batch_idx, batch in enumerate(train_loader, 1):
             batch = batch_to_float32(batch.to(device))
             optimizer.zero_grad()
-            loss, value_loss, policy_loss = batch_losses(model, batch, args.policy_weight)
+            loss, value_loss, policy_loss = batch_losses(model, batch, args.policy_weight, args.q_blend)
             loss.backward()
+            if args.clip_grad > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimizer.step()
             running_loss += loss.item() * batch.y.size(0)
             running_value_loss += value_loss.item() * batch.y.size(0)
@@ -460,7 +559,7 @@ def main() -> None:
             line += f"  train policy CE {train_policy_loss:.4f}  train loss {train_loss:.4f}"
         current = train_loss
         if val_loader is not None:
-            val_mse, sign_acc, decisive, val_policy_loss = evaluate(model, val_loader, device, args.policy_weight)
+            val_mse, sign_acc, decisive, val_policy_loss = evaluate(model, val_loader, device, args.policy_weight, args.q_blend)
             line += f"  val MSE {val_mse:.4f}"
             if decisive > 0:
                 line += f"  val segno-ok {sign_acc:.1%} (su {decisive} decisive)"
@@ -473,6 +572,7 @@ def main() -> None:
         # Salva il checkpoint migliore (su validation se c'e', altrimenti su train).
         if current < best_val:
             best_val = current
+            epochs_since_best = 0
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -487,12 +587,23 @@ def main() -> None:
                 output_path,
             )
             line += "  [salvato]"
+        else:
+            epochs_since_best += 1
 
         if scheduler is not None:
             line += f"  lr {optimizer.param_groups[0]['lr']:.2e}"
-            scheduler.step()
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(current)
+            else:
+                scheduler.step()
         print(line, flush=True)
         last_epoch_hours = (time.monotonic() - epoch_start) / 3600.0
+
+        # Early stopping: il best checkpoint e' gia' su disco, le epoche di
+        # plateau costano solo tempo (e denaro, su una GPU a noleggio).
+        if args.patience > 0 and epochs_since_best >= args.patience:
+            print(f"Stop per --patience: nessun miglioramento da {epochs_since_best} epoche.", flush=True)
+            break
 
     print(f"\nCheckpoint migliore salvato in: {output_path} (MSE {best_val:.4f})")
     print("Per esportarlo per il C++:")
