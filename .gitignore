@@ -55,6 +55,8 @@ data/
 
 # Modelli e checkpoint locali nella radice (ognuno esporta i propri)
 /*.pt
+# Checkpoint scaricati dalla GPU a noleggio (scripts/remote/fetch_checkpoint.sh)
+/checkpoints/
 
 # Executable files
 build/
