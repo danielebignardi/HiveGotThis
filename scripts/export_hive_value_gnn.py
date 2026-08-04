@@ -72,6 +72,15 @@ def export_model(args: argparse.Namespace) -> None:
     if args.weights is not None:
         load_weights(model, Path(args.weights), device)
 
+    # policy_version dice al C++ quale testa di policy e' stata allenata:
+    # si legge dai metadati del checkpoint (il trainer la salva), oppure si
+    # forza da riga di comando. I checkpoint senza metadati restano v1.
+    policy_version = args.policy_version
+    if policy_version is None and args.weights is not None:
+        ck = torch.load(Path(args.weights), map_location=device, weights_only=True)
+        policy_version = ck.get("policy_version", 1) if isinstance(ck, dict) else 1
+    model.policy_version = int(policy_version or 1)
+
     # eval() e' obbligatorio: Dropout deve essere disattivato sia per export
     # sia per inferenza C++.
     model.eval()
@@ -91,12 +100,30 @@ def export_model(args: argparse.Namespace) -> None:
         max_diff = (eager_out - scripted_out).abs().max().item()
         raise RuntimeError(f"Export fidelity check failed: max diff = {max_diff:.8f}")
 
+    # Fedelta' anche della testa v2 (2 mosse finte sul primo grafo del dummy:
+    # un piazzamento dalla mano e un movimento del nodo 0 con due vicini).
+    x, edge_index, edge_attr, u, batch = dummy_inputs
+    move_identity = torch.zeros((2, 12), device=device)
+    move_identity[0, 1] = 1.0; move_identity[0, 9] = 1.0   # piazzamento di una formica
+    move_identity[1, 0] = 1.0; move_identity[1, 10] = 1.0  # movimento della regina (nodo 0)
+    move_src = torch.tensor([-1, 0], dtype=torch.int64, device=device)
+    move_batch = torch.zeros(2, dtype=torch.int64, device=device)
+    dst_node = torch.tensor([1, 1, 2], dtype=torch.int64, device=device)
+    dst_slot = torch.tensor([0, 3, 5], dtype=torch.int64, device=device)
+    dst_move = torch.tensor([0, 1, 1], dtype=torch.int64, device=device)
+    v2_args = (x, edge_index, edge_attr, u, batch, move_identity, move_src, move_batch, dst_node, dst_slot, dst_move)
+    with torch.no_grad():
+        eager_v2 = model.forward_policy_v2(*v2_args)
+        scripted_v2 = scripted.forward_policy_v2(*v2_args)
+    if not torch.allclose(eager_v2, scripted_v2, atol=args.atol):
+        raise RuntimeError("Export fidelity check failed sulla policy v2")
+
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     scripted.save(str(output_path))
 
     print(f"Saved TorchScript model to: {output_path}")
-    print(f"Fidelity check passed with atol={args.atol}")
+    print(f"Fidelity check passed with atol={args.atol} (policy_version={model.policy_version})")
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,6 +134,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--move-feature-dim", type=int, default=MOVE_FEATURE_DIM)
+    parser.add_argument("--policy-version", type=int, default=None, choices=[1, 2],
+                        help="Forza la versione della policy esportata; default: dai metadati del checkpoint")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--atol", type=float, default=1e-5)
     return parser.parse_args()

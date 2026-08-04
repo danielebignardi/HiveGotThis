@@ -341,7 +341,18 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
 
     ValidateGraph(graph);
 
-    auto policyMethod = m_module.find_method("forward_policy");
+    // policy_version (attributo scritto dall'export): 2 = testa "edge
+    // prediction" sugli embedding dei nodi (forward_policy_v2); 1 o assente =
+    // testa sulle 32 move features. Un modello v1 esporta comunque anche il
+    // metodo v2 (TorchScript esporta tutto), ma con pesi mai allenati: per
+    // questo fa fede l'attributo, non la presenza del metodo.
+    int64_t policyVersion = 1;
+    if (m_module.hasattr("policy_version"))
+        policyVersion = m_module.attr("policy_version").toInt();
+
+    auto policyMethod = (policyVersion == 2)
+        ? m_module.find_method("forward_policy_v2")
+        : m_module.find_method("forward_policy");
     if (!policyMethod)
         return {};
 
@@ -380,24 +391,10 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
 
     torch::Tensor batch = torch::zeros({nodeCount}, iopt);
 
+    // Buffer che devono restare vivi fino alla chiamata: from_blob non copia.
     std::vector<float> moveFeatureValues;
-    moveFeatureValues.reserve(static_cast<size_t>(moveCount) * MoveFeatureDim);
-
-    for (const Move& move : moves)
-    {
-        std::vector<float> features = EncodeMoveFeatures(board, move);
-        if (features.size() != MoveFeatureDim)
-            throw std::runtime_error("EncodeMoveFeatures returned an unexpected feature size");
-        moveFeatureValues.insert(moveFeatureValues.end(), features.begin(), features.end());
-    }
-
     std::vector<int64_t> moveBatchIds(static_cast<size_t>(moveCount), 0);
-
-    torch::Tensor moveFeatures = torch::from_blob(
-        moveFeatureValues.data(),
-        {moveCount, MoveFeatureDim},
-        fopt
-    );
+    std::vector<int64_t> moveSrc, dstNode, dstSlot, dstMove;
 
     torch::Tensor moveBatch = torch::from_blob(
         moveBatchIds.data(),
@@ -405,15 +402,69 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
         iopt
     );
 
-    std::vector<torch::jit::IValue> inputs = {
-        x,
-        edgeIndex,
-        edgeAttr,
-        u,
-        batch,
-        moveFeatures,
-        moveBatch
-    };
+    std::vector<torch::jit::IValue> inputs;
+
+    if (policyVersion == 2)
+    {
+        // La v2 usa solo i primi 12 move feature (identita' della mossa:
+        // one-hot insetto, colore, piazzamento, movimento, pass) piu' la
+        // descrizione strutturale src/dst - stessa convenzione del trainer.
+        constexpr int64_t IdentityDim = 12;
+        moveFeatureValues.reserve(static_cast<size_t>(moveCount) * IdentityDim);
+        moveSrc.reserve(moves.size());
+
+        for (const Move& move : moves)
+        {
+            std::vector<float> features = EncodeMoveFeatures(board, move);
+            if (features.size() != MoveFeatureDim)
+                throw std::runtime_error("EncodeMoveFeatures returned an unexpected feature size");
+            moveFeatureValues.insert(moveFeatureValues.end(),
+                                     features.begin(), features.begin() + IdentityDim);
+
+            MoveStructure ms = EncodeMoveStructure(board, move);
+            const int64_t moveId = static_cast<int64_t>(moveSrc.size());
+            moveSrc.push_back(ms.src);
+            for (const auto& pair : ms.dst)
+            {
+                dstNode.push_back(pair[0]);
+                dstSlot.push_back(pair[1]);
+                dstMove.push_back(moveId);
+            }
+        }
+
+        const int64_t dstCount = static_cast<int64_t>(dstNode.size());
+        torch::Tensor identity = torch::from_blob(moveFeatureValues.data(), {moveCount, IdentityDim}, fopt);
+        torch::Tensor srcT = torch::from_blob(moveSrc.data(), {moveCount}, iopt);
+        torch::Tensor dstNodeT = dstCount > 0 ? torch::from_blob(dstNode.data(), {dstCount}, iopt)
+                                              : torch::zeros({0}, iopt);
+        torch::Tensor dstSlotT = dstCount > 0 ? torch::from_blob(dstSlot.data(), {dstCount}, iopt)
+                                              : torch::zeros({0}, iopt);
+        torch::Tensor dstMoveT = dstCount > 0 ? torch::from_blob(dstMove.data(), {dstCount}, iopt)
+                                              : torch::zeros({0}, iopt);
+
+        inputs = {x, edgeIndex, edgeAttr, u, batch,
+                  identity, srcT, moveBatch, dstNodeT, dstSlotT, dstMoveT};
+    }
+    else
+    {
+        moveFeatureValues.reserve(static_cast<size_t>(moveCount) * MoveFeatureDim);
+
+        for (const Move& move : moves)
+        {
+            std::vector<float> features = EncodeMoveFeatures(board, move);
+            if (features.size() != MoveFeatureDim)
+                throw std::runtime_error("EncodeMoveFeatures returned an unexpected feature size");
+            moveFeatureValues.insert(moveFeatureValues.end(), features.begin(), features.end());
+        }
+
+        torch::Tensor moveFeatures = torch::from_blob(
+            moveFeatureValues.data(),
+            {moveCount, MoveFeatureDim},
+            fopt
+        );
+
+        inputs = {x, edgeIndex, edgeAttr, u, batch, moveFeatures, moveBatch};
+    }
 
     torch::Tensor logits = (*policyMethod)(inputs).toTensor();
     if (!logits.defined() || logits.numel() != moveCount)

@@ -48,29 +48,49 @@ from torch_geometric.loader import DataLoader
 from hive_value_gnn import EDGE_IN_DIM, GLOBAL_DIM, MOVE_FEATURE_DIM, NODE_IN_DIM, HiveValueGNN, load_weights
 
 
-def read_policy_targets(rec: dict, move_feature_dim: int) -> tuple[torch.Tensor, torch.Tensor, bool]:
+def read_policy_targets(rec: dict, move_feature_dim: int):
     """Legge target policy opzionali dal record JSONL.
 
     Formati accettati:
-      {"moves": [{"features": [...], "pi": 0.7}, ...]}
+      {"moves": [{"features": [...], "pi": 0.7, "src": 3, "dst": [[0,2],...]}, ...]}
       {"move_features": [[...], ...], "policy_target": [...]}
+
+    Oltre a (move_features, policy_target, has_policy) restituisce la
+    descrizione strutturale per la policy v2: src (nodo del pezzo mosso,
+    -1 = dalla mano/pass) e le coppie dst appiattite (nodo vicino, slot
+    direzione, indice LOCALE della mossa). Indici in int16: sono piccoli
+    (< 28 nodi, < 256 mosse in pratica) e il dataset intero sta in RAM.
     """
     features = []
     targets = []
+    srcs = []
+    dst_node = []
+    dst_slot = []
+    dst_move = []
 
     if "moves" in rec:
-        for move in rec["moves"]:
+        for i, move in enumerate(rec["moves"]):
             features.append(move["features"])
             targets.append(move.get("pi", move.get("policy", move.get("target", 0.0))))
+            srcs.append(move.get("src", -1))
+            for node, slot in move.get("dst", []):
+                dst_node.append(node)
+                dst_slot.append(slot)
+                dst_move.append(i)
     elif "move_features" in rec:
         features = rec["move_features"]
         targets = rec.get("policy_target", rec.get("policy", rec.get("pi", [])))
+        srcs = [-1] * len(features)
 
     if not features:
         return (
             torch.empty((0, move_feature_dim), dtype=torch.float16),
             torch.empty((0,), dtype=torch.float32),
             False,
+            torch.empty((0,), dtype=torch.int16),
+            torch.empty((0,), dtype=torch.int16),
+            torch.empty((0,), dtype=torch.int16),
+            torch.empty((0,), dtype=torch.int16),
         )
 
     # float16: le move features sono il grosso del dataset in RAM (~60 mosse
@@ -86,7 +106,15 @@ def read_policy_targets(rec: dict, move_feature_dim: int) -> tuple[torch.Tensor,
     if target_sum > 0.0:
         policy_target = policy_target / target_sum
 
-    return move_features, policy_target, True
+    return (
+        move_features,
+        policy_target,
+        True,
+        torch.tensor(srcs, dtype=torch.int16),
+        torch.tensor(dst_node, dtype=torch.int16),
+        torch.tensor(dst_slot, dtype=torch.int16),
+        torch.tensor(dst_move, dtype=torch.int16),
+    )
 
 
 def record_to_data(rec: dict, move_feature_dim: int) -> Data:
@@ -104,8 +132,12 @@ def record_to_data(rec: dict, move_feature_dim: int) -> Data:
     edge_attr = torch.tensor(rec["edge_attr"], dtype=torch.float16).view(n_edges, EDGE_IN_DIM)
     u = torch.tensor(rec["u"], dtype=torch.float32).view(1, GLOBAL_DIM)
     y = torch.tensor([[float(rec["z"])]], dtype=torch.float32)  # [1,1] -> batcha a [B,1]
-    move_features, policy_target, has_policy = read_policy_targets(rec, move_feature_dim)
+    move_features, policy_target, has_policy, move_src, dst_node, dst_slot, dst_move = \
+        read_policy_targets(rec, move_feature_dim)
 
+    # NB: move_src/dst_* NON contengono 'index' nel nome apposta: il batching
+    # PyG non deve auto-incrementarli (move_src usa -1 come sentinella "dalla
+    # mano"); gli offset di batch si applicano a mano nella loss v2.
     return Data(
         x=x,
         edge_index=edge_index,
@@ -115,6 +147,10 @@ def record_to_data(rec: dict, move_feature_dim: int) -> Data:
         move_features=move_features,
         policy_target=policy_target,
         has_policy=torch.tensor([has_policy], dtype=torch.bool),
+        move_src=move_src,
+        dst_node=dst_node,
+        dst_slot=dst_slot,
+        dst_move=dst_move,
     )
 
 
@@ -239,6 +275,24 @@ D6_COLUMN_PERMS = [
     [(r - j) % 6 for j in range(6)] + [6, 7, 8] for r in range(6)
 ]
 
+# Mappa VALORE->VALORE degli slot per ogni simmetria (sigma tale che lo slot
+# d finisce in sigma(d)): serve per ruotare i dst_slot della policy v2 in modo
+# coerente con la permutazione delle colonne di edge_attr. Lo slot 6 (salita
+# sopra la pila) e' invariante per qualunque simmetria planare.
+D6_SLOT_MAPS = []
+for _perm in D6_COLUMN_PERMS:
+    _sigma = [0] * 7
+    for _j in range(6):
+        _sigma[_perm[_j]] = _j
+    _sigma[6] = 6
+    D6_SLOT_MAPS.append(torch.tensor(_sigma, dtype=torch.int16))
+
+
+def _permute_dst_slots(slots: torch.Tensor, k: int) -> torch.Tensor:
+    if k == 0 or slots.numel() == 0:
+        return slots
+    return D6_SLOT_MAPS[k].index_select(0, slots.long())
+
 
 class D6Augment(torch.utils.data.Dataset):
     """Augmentation on-the-fly: a ogni epoca ogni posizione riceve una delle
@@ -260,6 +314,10 @@ class D6Augment(torch.utils.data.Dataset):
         k = self.rng.randrange(len(D6_COLUMN_PERMS))
         if k == 0:
             return d  # identita'
+        # La simmetria lascia invariati move_features (nessuna direzione
+        # assoluta) e gli indici di nodo (i nodi non cambiano posto); gli
+        # UNICI valori direzionali della policy sono i dst_slot, che ruotano
+        # con la stessa sigma delle colonne di edge_attr.
         return Data(
             x=d.x,
             edge_index=d.edge_index,
@@ -269,20 +327,15 @@ class D6Augment(torch.utils.data.Dataset):
             move_features=d.move_features,
             policy_target=d.policy_target,
             has_policy=d.has_policy,
+            move_src=d.move_src,
+            dst_node=d.dst_node,
+            dst_slot=_permute_dst_slots(d.dst_slot, k),
+            dst_move=d.dst_move,
         )
 
 
-def policy_loss_for_batch(model: HiveValueGNN, batch) -> torch.Tensor:
-    if batch.move_features.numel() == 0:
-        return batch.y.new_tensor(0.0)
-
-    board_embedding = model.encode_board(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
-    logits = model.forward_policy_from_embedding(
-        board_embedding,
-        batch.move_features,
-        batch.move_features_batch,
-    )
-
+def _cross_entropy_over_positions(logits: torch.Tensor, batch) -> torch.Tensor:
+    """CE media per posizione: softmax sulle sole mosse legali di ogni grafo."""
     total = logits.new_tensor(0.0)
     count = 0
     for graph_id in torch.unique(batch.move_features_batch):
@@ -300,15 +353,50 @@ def policy_loss_for_batch(model: HiveValueGNN, batch) -> torch.Tensor:
     return total / count
 
 
-def batch_losses(model: HiveValueGNN, batch, policy_weight: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def policy_loss_for_batch(model: HiveValueGNN, batch, policy_version: int = 1) -> torch.Tensor:
+    if batch.move_features.numel() == 0:
+        return batch.y.new_tensor(0.0)
+
+    if policy_version == 2:
+        # Gli indici nel JSONL sono locali alla posizione: nel batch vanno
+        # tradotti in globali. batch.ptr da' l'offset dei nodi di ogni grafo;
+        # per le mosse l'offset si ricava dai conteggi per grafo.
+        move_batch = batch.move_features_batch
+        node_offset = batch.ptr.index_select(0, move_batch)
+        src_local = batch.move_src.long()
+        move_src = torch.where(src_local >= 0, src_local + node_offset, src_local)
+
+        move_counts = torch.bincount(move_batch, minlength=batch.num_graphs)
+        move_ptr = torch.cat([move_counts.new_zeros(1), move_counts.cumsum(0)[:-1]])
+        dst_graph = batch.dst_node_batch
+        dst_node = batch.dst_node.long() + batch.ptr.index_select(0, dst_graph)
+        dst_move = batch.dst_move.long() + move_ptr.index_select(0, dst_graph)
+
+        logits = model.forward_policy_v2(
+            batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch,
+            batch.move_features[:, :12].float(), move_src, move_batch,
+            dst_node, batch.dst_slot.long(), dst_move,
+        )
+        return _cross_entropy_over_positions(logits, batch)
+
+    board_embedding = model.encode_board(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
+    logits = model.forward_policy_from_embedding(
+        board_embedding,
+        batch.move_features,
+        batch.move_features_batch,
+    )
+    return _cross_entropy_over_positions(logits, batch)
+
+
+def batch_losses(model: HiveValueGNN, batch, policy_weight: float, policy_version: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.u, batch.batch)
     value_loss = torch.nn.functional.mse_loss(pred, batch.y)
-    policy_loss = policy_loss_for_batch(model, batch) if policy_weight > 0.0 else pred.new_tensor(0.0)
+    policy_loss = policy_loss_for_batch(model, batch, policy_version) if policy_weight > 0.0 else pred.new_tensor(0.0)
     return value_loss + policy_weight * policy_loss, value_loss, policy_loss
 
 
 @torch.no_grad()
-def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device, policy_weight: float) -> tuple[float, float, int, float]:
+def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device, policy_weight: float, policy_version: int) -> tuple[float, float, int, float]:
     """Restituisce (MSE medio, accuratezza del segno sulle posizioni decisive,
     numero di posizioni decisive). "Decisive" = z != 0: li' il segno della
     predizione dice se la rete indovina il vincitore."""
@@ -326,7 +414,7 @@ def evaluate(model: HiveValueGNN, loader: DataLoader, device: torch.device, poli
         total_loss += torch.nn.functional.mse_loss(pred, batch.y, reduction="sum").item()
         total_count += batch.y.size(0)
         if policy_weight > 0.0 and batch.move_features.numel() > 0:
-            total_policy_loss += policy_loss_for_batch(model, batch).item()
+            total_policy_loss += policy_loss_for_batch(model, batch, policy_version).item()
             policy_batches += 1
 
         mask = batch.y.view(-1) != 0
@@ -361,6 +449,8 @@ def main() -> None:
     parser.add_argument("--move-feature-dim", type=int, default=MOVE_FEATURE_DIM)
     parser.add_argument("--policy-weight", type=float, default=0.0,
                         help="Peso della policy loss. Default 0 = training value-only compatibile coi dataset attuali")
+    parser.add_argument("--policy-v2", action="store_true",
+                        help="Policy 'edge prediction' sugli embedding dei nodi (campi src/dst del JSONL) al posto delle 32 move features fatte a mano")
     parser.add_argument("--max-hours", type=float, default=None,
                         help="Tetto di ore dall'avvio (caricamento incluso): il training si ferma PRIMA di iniziare un'epoca che non ci starebbe. Serve sulle sessioni a tempo (Kaggle: 12h, oltre le quali l'output va perso)")
     parser.add_argument("--augment", action="store_true",
@@ -383,9 +473,19 @@ def main() -> None:
     print(f"Dataset: {len(games)} partite, {len(train_data) + len(val_data)} posizioni "
           f"({n_decisive} decisive) -> train {len(train_data)}, validation {len(val_data)}")
 
+    policy_version = 2 if args.policy_v2 else 1
+    if args.policy_v2 and args.policy_weight > 0.0:
+        # La v2 richiede i campi strutturali src/dst nel JSONL: verifica su
+        # un campione che ci siano (i dataset value-only o pre-policy no).
+        for i in range(min(len(train_data), 200)):
+            d = train_data[i]
+            if d.move_features.size(0) > 0:
+                if d.move_src.size(0) != d.move_features.size(0):
+                    sys.exit("Errore: --policy-v2 ma il dataset non ha i campi src/dst per mossa")
+                break
     train_set = D6Augment(train_data, args.seed) if args.augment else train_data
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, follow_batch=["move_features"])
-    val_loader = DataLoader(val_data, batch_size=args.batch_size, follow_batch=["move_features"]) if val_data else None
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, follow_batch=["move_features", "dst_node"])
+    val_loader = DataLoader(val_data, batch_size=args.batch_size, follow_batch=["move_features", "dst_node"]) if val_data else None
 
     model = HiveValueGNN(
         hidden_dim=args.hidden_dim,
@@ -438,7 +538,7 @@ def main() -> None:
         for batch_idx, batch in enumerate(train_loader, 1):
             batch = batch_to_float32(batch.to(device))
             optimizer.zero_grad()
-            loss, value_loss, policy_loss = batch_losses(model, batch, args.policy_weight)
+            loss, value_loss, policy_loss = batch_losses(model, batch, args.policy_weight, policy_version)
             loss.backward()
             optimizer.step()
             running_loss += loss.item() * batch.y.size(0)
@@ -460,7 +560,7 @@ def main() -> None:
             line += f"  train policy CE {train_policy_loss:.4f}  train loss {train_loss:.4f}"
         current = train_loss
         if val_loader is not None:
-            val_mse, sign_acc, decisive, val_policy_loss = evaluate(model, val_loader, device, args.policy_weight)
+            val_mse, sign_acc, decisive, val_policy_loss = evaluate(model, val_loader, device, args.policy_weight, policy_version)
             line += f"  val MSE {val_mse:.4f}"
             if decisive > 0:
                 line += f"  val segno-ok {sign_acc:.1%} (su {decisive} decisive)"
@@ -483,6 +583,7 @@ def main() -> None:
                     "dropout": args.dropout,
                     "move_feature_dim": args.move_feature_dim,
                     "policy_weight": args.policy_weight,
+                    "policy_version": policy_version,
                 },
                 output_path,
             )

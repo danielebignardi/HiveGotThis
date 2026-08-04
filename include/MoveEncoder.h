@@ -4,6 +4,7 @@
 #include "Board.h"
 #include "Move.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -23,14 +24,23 @@ std::string MoveFeaturesToJson(const std::vector<float>& features);
 // -1 se il pezzo non e' sulla board (piazzamento) o non e' valido.
 int GraphNodeIndex(const Board& board, PieceName piece);
 
-// Frammento JSON '"src":K,"dst":[[nodo,slot],...]' che descrive la mossa in
-// termini di nodi del grafo, per una futura policy sugli embedding dei nodi:
-//   src = nodo del pezzo mosso (-1 = piazzamento o pass);
-//   dst = vicini occupati della destinazione, coppie [nodo, slot direzione
-//         dal vicino VERSO la destinazione]; slot 6 (up) = la destinazione
+// Descrizione strutturale di una mossa in termini di nodi del grafo, usata
+// dalla policy v2 (edge prediction sugli embedding):
+//   src = nodo del pezzo mosso (-1 = piazzamento dalla mano o pass);
+//   dst = vicini occupati della destinazione, coppie {nodo, slot direzione
+//         dal vicino VERSO la destinazione}; slot 6 (up) = la destinazione
 //         e' in cima a quel pezzo (salita).
 // Il pezzo mosso non compare mai in dst: dopo la mossa non e' piu' nella
 // cella di partenza (se sotto ha un altro pezzo, vale quello).
+struct MoveStructure
+{
+    int src = -1;
+    std::vector<std::array<int, 2>> dst;
+};
+
+MoveStructure EncodeMoveStructure(const Board& board, const Move& move);
+
+// Serializzazione JSON della stessa struttura: '"src":K,"dst":[[nodo,slot],...]'
 std::string MoveStructuralJson(const Board& board, const Move& move);
 
 } // namespace HiveGotThis

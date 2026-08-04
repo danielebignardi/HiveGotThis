@@ -195,43 +195,49 @@ int GraphNodeIndex(const Board& board, PieceName piece)
     return index;
 }
 
-std::string MoveStructuralJson(const Board& board, const Move& move)
+MoveStructure EncodeMoveStructure(const Board& board, const Move& move)
 {
-    std::ostringstream ss;
-    ss << "\"src\":" << (move == PassMove ? -1 : GraphNodeIndex(board, move.Piece));
-    ss << ",\"dst\":[";
+    MoveStructure ms;
+    if (move == PassMove)
+        return ms;
 
-    if (!(move == PassMove))
+    ms.src = GraphNodeIndex(board, move.Piece);
+
+    Index dest = move.Destination;
+    PieceName onTop = board.GetPieceAt(dest);
+    if (onTop != PieceName::INVALID)
     {
-        Index dest = move.Destination;
-        bool first = true;
-
-        PieceName onTop = board.GetPieceAt(dest);
-        if (onTop != PieceName::INVALID)
-        {
-            ss << "[" << GraphNodeIndex(board, onTop) << "," << GNNSlotUp << "]";
-            first = false;
-        }
-        else
-        {
-            for (int d = 0; d < 6; ++d)
-            {
-                Index nb = GetNeighborAt(dest, static_cast<Direction>(d));
-                if (!IsValidIndex(nb)) continue;
-
-                PieceName np = board.GetPieceAt(nb);
-                if (np == move.Piece)
-                    np = board.GetPieceUnder(np);
-                if (np == PieceName::INVALID) continue;
-
-                if (!first) ss << ",";
-                ss << "[" << GraphNodeIndex(board, np) << ","
-                   << static_cast<int>(Opposite(static_cast<Direction>(d))) << "]";
-                first = false;
-            }
-        }
+        ms.dst.push_back({GraphNodeIndex(board, onTop), GNNSlotUp});
+        return ms;
     }
 
+    for (int d = 0; d < 6; ++d)
+    {
+        Index nb = GetNeighborAt(dest, static_cast<Direction>(d));
+        if (!IsValidIndex(nb)) continue;
+
+        PieceName np = board.GetPieceAt(nb);
+        if (np == move.Piece)
+            np = board.GetPieceUnder(np);
+        if (np == PieceName::INVALID) continue;
+
+        ms.dst.push_back({GraphNodeIndex(board, np),
+                          static_cast<int>(Opposite(static_cast<Direction>(d)))});
+    }
+    return ms;
+}
+
+std::string MoveStructuralJson(const Board& board, const Move& move)
+{
+    MoveStructure ms = EncodeMoveStructure(board, move);
+
+    std::ostringstream ss;
+    ss << "\"src\":" << ms.src << ",\"dst\":[";
+    for (size_t i = 0; i < ms.dst.size(); ++i)
+    {
+        if (i > 0) ss << ",";
+        ss << "[" << ms.dst[i][0] << "," << ms.dst[i][1] << "]";
+    }
     ss << "]";
     return ss.str();
 }
