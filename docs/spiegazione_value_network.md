@@ -530,20 +530,23 @@ misura la forza assoluta, quello tra generazioni la forza relativa.
   sui tensori già serializzati, **permutando i 6 slot piani di
   `edge_attr`** (gli slot 6-8 — su/giù/self — e `x`, `u`, `edge_index`
   restano invariati). Moltiplicherebbe il dataset ×12 senza rigiocare nulla.
-- **Policy head — IN CORSO (luglio 2026)**: l'infrastruttura è implementata.
-  La rete ha una `policy_head` "move-as-input" (embedding di board + 32
-  feature della mossa da `MoveEncoder` → logit, softmax sulle sole legali;
-  `forward()` resta value-only, compatibile coi modelli vecchi); l'MCTS usa
-  le prior come termine PUCT quando il modello esportato le contiene
-  (fallback automatico all'euristica `EvaluateMove` altrimenti); i target
-  arrivano da tre strade: `SelfPlay` (visite MCTS, §3), il convertitore con
-  `--policy` (imitazione delle mosse umane, §4), `uhp_match dataset` (via
-  UHP). Il training si attiva con `--policy-weight`. Restano da fare: il
-  primo training vero, la misura del costo (una chiamata rete in più per
-  espansione) e il match di verifica. Evoluzione candidata ("v2"): policy
-  sugli **embedding dei nodi** invece delle 32 feature a mano — i campi
-  `src`/`dst` già emessi nei dataset servono a quello, senza rigiocare
-  l'archivio.
+- **Policy head — FATTA, in due versioni (agosto 2026)**. La **v1**
+  "move-as-input" (embedding di board + 32 feature della mossa da
+  `MoveEncoder` → logit, softmax sulle sole legali) ha dimostrato che i
+  prior nel PUCT ripagano il loro costo (~27% di iterazioni in meno):
+  +15 punti su nokamute rispetto al solo value. La **v2** "edge
+  prediction" (`forward_policy_v2`) valuta la mossa dagli **embedding dei
+  nodi**: embedding del pezzo mosso (o del tipo di insetto se piazzato
+  dalla mano), aggregazione dei vicini della destinazione con l'embedding
+  della direzione d'arrivo, embedding di board e 12 bit di identità della
+  mossa — i campi `src`/`dst` già presenti in tutti i dataset. Risultato:
+  policy CE 2.56 contro il 2.82 (tetto) della v1, e altri +10 su nokamute.
+  L'attributo TorchScript `policy_version` dice al C++ quale testa è stata
+  allenata (i modelli v1 e value-only restano pienamente compatibili);
+  `forward()` resta value-only. Il training v2 si attiva con
+  `--policy-v2` (richiede `--policy-weight`); con `--augment` i
+  `dst_slot` ruotano insieme al grafo. Numeri, cronologia delle
+  promozioni e lezioni di metodo: `docs/generazioni.md`.
 - **Testa WDL / cross-entropy**: alternativa alla MSE se la `tanh` saturasse
   (gradienti migliori vicino a ±1); da considerare solo se il problema si
   manifesta nei dati.
