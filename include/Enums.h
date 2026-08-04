@@ -106,8 +106,15 @@ std::string GetEnumString(GameType const &value);
 PieceName GetPieceNameValue(const char *str);
 GameType GetGameTypeValue(const char *str);
 
-bool GameInProgress(BoardState const &value);
-bool GameIsOver(BoardState const &value);
+inline bool GameInProgress(BoardState const &value)
+{
+    return value == BoardState::NotStarted || value == BoardState::InProgress;
+}
+
+inline bool GameIsOver(BoardState const &value)
+{
+    return !GameInProgress(value);
+}
 
 // Definite inline in header: sono chiamate milioni di volte nei loop di generazione
 // mosse; tenerle qui permette al compilatore di inlinearle (niente call cross-TU).

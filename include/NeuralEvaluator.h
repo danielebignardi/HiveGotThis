@@ -7,8 +7,13 @@
 
 #include <torch/script.h>
 
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace HiveGotThis
@@ -41,13 +46,25 @@ namespace HiveGotThis
 class TorchScriptValueEvaluator
 {
 public:
-    explicit TorchScriptValueEvaluator(const std::string& modelPath);
+    // device puo' essere "cpu", "cuda", "cuda:N" oppure "auto".
+    // "auto" usa CUDA quando disponibile e altrimenti la CPU.
+    explicit TorchScriptValueEvaluator(const std::string& modelPath,
+                                       const std::string& device = "cpu");
+    ~TorchScriptValueEvaluator();
+
+    TorchScriptValueEvaluator(const TorchScriptValueEvaluator&) = delete;
+    TorchScriptValueEvaluator& operator=(const TorchScriptValueEvaluator&) = delete;
 
     // Parametro opzionale di performance per l'MCTS.
     //
     // Se il motore usa piu' worker MCTS, spesso conviene tenere il parallelismo
     // intra-op di libtorch a 1 e parallelizzare a livello di ricerca.
     static void SetTorchThreads(int numThreads);
+
+    // Attiva il coordinatore condiviso per il self-play parallelo. Ogni MCTS
+    // invia una sola foglia e resta in attesa; il coordinatore aggrega richieste
+    // provenienti da partite diverse fino a maxBatchSize o maxWaitMicros.
+    void EnableCrossGameBatching(int maxBatchSize, int maxWaitMicros = 2000);
 
     // Metodo comodo: codifica una Board e la valuta come singolo grafo.
     float EvaluateBoard(const Board& board);
@@ -79,7 +96,13 @@ public:
     // head, restituisce un vettore vuoto e il chiamante puo' fare fallback.
     std::vector<float> EvaluateMovePriors(const Board& board, const std::vector<Move>& moves);
 
+    const torch::Device& GetDevice() const { return m_device; }
+
 private:
+    struct ValueRequest;
+
+    void ValueBatchWorker();
+
     static int64_t NodeCount(const GNNGraph& graph);// num nodi e numero edge per creare il tensore
     static int64_t EdgeCount(const GNNGraph& graph);
     static void ValidateGraph(const GNNGraph& graph); //Controlla che il grafo sia valido prima di mandarlo alla rete.
@@ -88,7 +111,23 @@ private:
 Se valuti una board, la rete deve restituire 1 valore.
 Se valuti 8 board in batch, deve restituire 8 valori.*/
 
+    torch::Device m_device;
     torch::jit::script::Module m_module;
+    std::mutex m_moduleMutex;
+
+    std::mutex m_queueMutex;
+    std::condition_variable m_queueReady;
+    std::deque<std::shared_ptr<ValueRequest>> m_valueQueue;
+    std::thread m_valueBatchThread;
+    bool m_stopValueBatchThread = false;
+    int m_crossGameBatchSize = 1;
+    int m_crossGameMaxWaitMicros = 2000;
+    bool m_hasPolicyHead = false;
+    // Versione della testa di policy del modello caricato (attributo
+    // TorchScript scritto dall'export): 1 = move features, 2 = edge
+    // prediction sugli embedding (forward_policy_v2). Letta una volta al
+    // caricamento, fuori dal percorso caldo.
+    int64_t m_policyVersion = 1;
 };
 
 } // namespace HiveGotThis

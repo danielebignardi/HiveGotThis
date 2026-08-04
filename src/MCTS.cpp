@@ -20,23 +20,21 @@ namespace
 
     // Profiling: tempo cumulativo e numero di chiamate reali alla rete
     // (solo cache miss). Non usate nel normale funzionamento del motore.
-    double g_networkTimeMs = 0.0;
-    long   g_networkCallCount = 0;
+    thread_local double g_networkTimeMs = 0.0;
+    thread_local long   g_networkCallCount = 0;
 
     // Profiling: numero totale di iterazioni MCTS eseguite (cache hit + miss).
-    long g_iterationCount = 0;
+    thread_local long g_iterationCount = 0;
 
-    // Transposition table persistente per tutta la durata del processo: le
+    // Transposition table persistente per tutta la durata del worker: le
     // entry sono valutazioni pure della value network per una board, valide
     // finche' i pesi della rete non cambiano (caricati una volta sola in
     // main.cpp) - quindi e' sicuro riusarle tra chiamate di Search/SearchIterations
-    // diverse (turni diversi, anche partite diverse nello stesso processo).
-    std::unique_ptr<TranspositionTable> g_tt;
+    // diverse. thread_local evita data race tra partite concorrenti.
+    thread_local std::unique_ptr<TranspositionTable> g_tt;
 
-    // Con la tabella persistente l'allocazione avviene una sola volta per
-    // processo (non piu' ad ogni Search), quindi possiamo permetterci una
-    // tabella piu' grande della vecchia 2^18 per-chiamata.
-    constexpr size_t PERSISTENT_TT_SIZE_POWER2 = 21; // ~2.1M entries, ~48 MB
+    // Una tabella per worker: 2^19 limita la memoria a circa 12 MB/thread.
+    constexpr size_t PERSISTENT_TT_SIZE_POWER2 = 19;
 }
 
 void MCTS::SetValueNetwork(TorchScriptValueEvaluator* evaluator)
@@ -300,205 +298,172 @@ void MCTS::TrySolve(MCTSNode* node)
 // MCTS - Algoritmo principale
 // =============================================================================
 
-// Esegue una singola iterazione MCTS: selezione -> espansione -> valutazione -> backpropagation.
-// Convenzione negamax: ogni valore e' in [-1,1] dal punto di vista del giocatore di turno nel
-// nodo (+1 = chi muove vince, -1 = perde, 0 = patta); il segno si inverte ad ogni livello in backup.
-void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard, TranspositionTable& tt)
+// Esegue una singola iterazione completa. Ogni albero resta sequenziale:
+// il parallelismo del self-play avviene tra partite indipendenti.
+void MCTS::RunIteration(MCTSNode* root, const Board& rootBoard,
+                        TranspositionTable& tt)
 {
-    ++g_iterationCount;
-
-    // === SELEZIONE ===
-    // Scende nell'albero seguendo UCB/PUCT fino a un nodo da espandere, terminale, o provato.
-    MCTSNode* node = root;
-    Board board = rootBoard;
-    int depth = 0;
-
-    while (node->isExpanded && !node->isTerminal && node->provenResult == 0)
+    auto backup = [](MCTSNode* node, double value)
     {
-        double logParent = std::log(static_cast<double>(node->visitCount + 1));
-        double sqrtParent = std::sqrt(static_cast<double>(node->visitCount));
-
-        MCTSNode* best = nullptr;
-        double bestUCB = -std::numeric_limits<double>::max();
-
-        for (MCTSNode* child : node->children)
-        {
-            double ucb = child->SelectionScore(EXPLORATION_C, logParent, sqrtParent);
-            if (ucb > bestUCB)
-            {
-                bestUCB = ucb;
-                best = child;
-            }
-        }
-
-        board.ApplyMove(best->move);
-        node = best;
-        depth++;
-    }
-
-    // Nodo gia' provato: backpropaga direttamente senza espandere.
-    // value e' dal punto di vista del giocatore di turno nel nodo; negamax inverte il segno ad ogni livello.
-    if (node->provenResult != 0)
-    {
-        double value = (node->provenResult == 1) ? 1.0 : -1.0;
-        MCTSNode* current = node;
-        while (current != nullptr)
+        for (MCTSNode* current = node; current != nullptr; current = current->parent)
         {
             current->visitCount++;
             current->totalValue += value;
             value = -value;
-            current = current->parent;
         }
-        return;
-    }
+    };
 
-    // === ESPANSIONE ===
-    if (!node->isTerminal)
     {
-        // Primo accesso: genera le mosse valide e controllase la partita e' finita
-        if (node->unexpandedMoves.empty() && node->children.empty())
+        ++g_iterationCount;
+
+        MCTSNode* node = root;
+        Board board = rootBoard;
+        int depth = 0;
+
+        while (node->isExpanded && !node->isTerminal && node->provenResult == 0)
         {
-            BoardState state = board.GetBoardState();
-            if (GameIsOver(state))
-            {
-                node->isTerminal = true;
-                node->isExpanded = true;
+            double logParent = std::log(static_cast<double>(node->visitCount + 1));
+            double sqrtParent = std::sqrt(static_cast<double>(node->visitCount));
 
-                // provenResult dal punto di vista del giocatore di turno in questo nodo (board.currentColor)
-                if (state == BoardState::WhiteWins)
-                    node->provenResult = (board.currentColor == Color::White) ? 1 : -1;
-                else if (state == BoardState::BlackWins)
-                    node->provenResult = (board.currentColor == Color::White) ? -1 : 1;
-            }
-            else
-            {
-                board.GetValidMoves(node->unexpandedMoves);
-                OrderMoves(node->unexpandedMoves, board, board.currentColor);
-                node->unexpandedPriors.clear();
+            MCTSNode* best = nullptr;
+            double bestUCB = -std::numeric_limits<double>::max();
 
-                if (g_valueNetwork != nullptr)
+            for (MCTSNode* child : node->children)
+            {
+                double ucb = child->SelectionScore(EXPLORATION_C, logParent, sqrtParent);
+                if (ucb > bestUCB)
                 {
-                    std::vector<float> priors = g_valueNetwork->EvaluateMovePriors(board, node->unexpandedMoves);
-                    if (priors.size() == node->unexpandedMoves.size())
+                    bestUCB = ucb;
+                    best = child;
+                }
+            }
+
+            board.ApplyMove(best->move);
+            node = best;
+            depth++;
+        }
+
+        if (node->provenResult != 0)
+        {
+            backup(node, node->provenResult == 1 ? 1.0 : -1.0);
+            return;
+        }
+
+        if (!node->isTerminal)
+        {
+            if (node->unexpandedMoves.empty() && node->children.empty())
+            {
+                BoardState state = board.GetBoardState();
+                if (GameIsOver(state))
+                {
+                    node->isTerminal = true;
+                    node->isExpanded = true;
+                    if (state == BoardState::WhiteWins)
+                        node->provenResult = (board.currentColor == Color::White) ? 1 : -1;
+                    else if (state == BoardState::BlackWins)
+                        node->provenResult = (board.currentColor == Color::White) ? -1 : 1;
+                }
+                else
+                {
+                    board.GetValidMoves(node->unexpandedMoves);
+                    OrderMoves(node->unexpandedMoves, board, board.currentColor);
+                    node->unexpandedPriors.clear();
+
+                    if (g_valueNetwork != nullptr)
                     {
-                        std::vector<std::pair<Move, double>> ordered;
-                        ordered.reserve(node->unexpandedMoves.size());
-                        for (size_t i = 0; i < node->unexpandedMoves.size(); ++i)
-                            ordered.push_back({node->unexpandedMoves[i], static_cast<double>(priors[i])});
-
-                        // Stable: in caso di prior uguale conserva l'ordine euristico precedente.
-                        std::stable_sort(ordered.begin(), ordered.end(),
-                            [](const auto& a, const auto& b)
-                            {
-                                return a.second < b.second;
-                            }
-                        );
-
-                        for (size_t i = 0; i < ordered.size(); ++i)
+                        std::vector<float> priors =
+                            g_valueNetwork->EvaluateMovePriors(board, node->unexpandedMoves);
+                        if (priors.size() == node->unexpandedMoves.size())
                         {
-                            node->unexpandedMoves[i] = ordered[i].first;
-                            node->unexpandedPriors.push_back(ordered[i].second);
+                            std::vector<std::pair<Move, double>> ordered;
+                            ordered.reserve(node->unexpandedMoves.size());
+                            for (size_t i = 0; i < node->unexpandedMoves.size(); ++i)
+                                ordered.push_back({node->unexpandedMoves[i],
+                                                   static_cast<double>(priors[i])});
+
+                            std::stable_sort(ordered.begin(), ordered.end(),
+                                [](const auto& a, const auto& b)
+                                {
+                                    return a.second < b.second;
+                                });
+
+                            for (size_t i = 0; i < ordered.size(); ++i)
+                            {
+                                node->unexpandedMoves[i] = ordered[i].first;
+                                node->unexpandedPriors.push_back(ordered[i].second);
+                            }
                         }
                     }
                 }
             }
+
+            if (!node->unexpandedMoves.empty())
+            {
+                Move move = node->unexpandedMoves.back();
+                node->unexpandedMoves.pop_back();
+
+                double policyPrior = 0.0;
+                if (!node->unexpandedPriors.empty())
+                {
+                    policyPrior = node->unexpandedPriors.back();
+                    node->unexpandedPriors.pop_back();
+                }
+
+                if (node->unexpandedMoves.empty())
+                    node->isExpanded = true;
+
+                double hScore = EvaluateMove(board, move, board.currentColor);
+
+                MCTSNode* child = new MCTSNode(move, node, hScore);
+                child->policyPrior = policyPrior;
+                node->children.push_back(child);
+
+                board.ApplyMove(move);
+                node = child;
+                depth++;
+
+                BoardState childState = board.GetBoardState();
+                if (GameIsOver(childState))
+                {
+                    node->isTerminal = true;
+                    node->isExpanded = true;
+                    if (childState == BoardState::WhiteWins)
+                        node->provenResult = (board.currentColor == Color::White) ? 1 : -1;
+                    else if (childState == BoardState::BlackWins)
+                        node->provenResult = (board.currentColor == Color::White) ? -1 : 1;
+                }
+            }
         }
 
-        // Estrae la mossa migliore (in coda) e crea il nodo figlio
-        if (!node->unexpandedMoves.empty())
+        if (node->provenResult != 0)
         {
-            Move move = node->unexpandedMoves.back();
-            node->unexpandedMoves.pop_back();
-
-            double policyPrior = 0.0;
-            if (!node->unexpandedPriors.empty())
-            {
-                policyPrior = node->unexpandedPriors.back();
-                node->unexpandedPriors.pop_back();
-            }
-
-            if (node->unexpandedMoves.empty())
-                node->isExpanded = true;
-
-            // heuristicScore dal punto di vista di chi muove ora (board.currentColor),
-            // ovvero il genitore: si allinea con l'utilita' del genitore nel termine di bias.
-            double hScore = EvaluateMove(board, move, board.currentColor);
-
-            MCTSNode* child = new MCTSNode(move, node, hScore);
-            child->policyPrior = policyPrior;
-            node->children.push_back(child);
-
-            board.ApplyMove(move);
-            node = child;
-            depth++;
-
-            // Controlla se il nuovo stato e' terminale
-            BoardState childState = board.GetBoardState();
-            if (GameIsOver(childState))
-            {
-                node->isTerminal = true;
-                node->isExpanded = true;
-
-                // provenResult dal punto di vista del giocatore di turno nel figlio (board.currentColor dopo ApplyMove)
-                if (childState == BoardState::WhiteWins)
-                    node->provenResult = (board.currentColor == Color::White) ? 1 : -1;
-                else if (childState == BoardState::BlackWins)
-                    node->provenResult = (board.currentColor == Color::White) ? -1 : 1;
-            }
+            backup(node, node->provenResult == 1 ? 1.0 : -1.0);
+            if (node->parent != nullptr)
+                TrySolve(node->parent);
+            return;
         }
-    }
 
-    // === VALUTAZIONE ===
-    // Determina il valore della foglia: risultato provato, cache TT, o euristica.
-    // value e' in [-1,1] dal punto di vista del giocatore di turno nella foglia (board.currentColor).
-    double value;
-
-    if (node->provenResult != 0)
-    {
-        value = (node->provenResult == 1) ? 1.0 : -1.0;
-    }
-    else
-    {
         uint64_t hash = board.GetHash();
         TTEntry ttEntry;
-
         if (tt.Probe(hash, ttEntry))
         {
-            // L'hash Zobrist include il turno, quindi il valore side-to-move memorizzato e' coerente.
-            value = ttEntry.value;
+            backup(node, ttEntry.value);
+            return;
         }
-        else
-        {
-            if (g_valueNetwork == nullptr)
-                throw std::runtime_error("MCTS: value network non impostata (chiamare SetValueNetwork prima di Search)");
 
-            // La value network restituisce gia' [-1,1] dal punto di vista di chi muove.
-            auto netStart = std::chrono::steady_clock::now();
-            value = static_cast<double>(g_valueNetwork->EvaluateBoard(board));
-            auto netEnd = std::chrono::steady_clock::now();
-            g_networkTimeMs += std::chrono::duration<double, std::milli>(netEnd - netStart).count();
-            ++g_networkCallCount;
+        if (g_valueNetwork == nullptr)
+            throw std::runtime_error(
+                "MCTS: value network non impostata (chiamare SetValueNetwork prima di Search)");
 
-            tt.Store(hash, value, static_cast<int16_t>(depth), node->isTerminal);
-        }
-    }
+        auto netStart = std::chrono::steady_clock::now();
+        double value = static_cast<double>(g_valueNetwork->EvaluateBoard(board));
+        auto netEnd = std::chrono::steady_clock::now();
+        g_networkTimeMs +=
+            std::chrono::duration<double, std::milli>(netEnd - netStart).count();
+        ++g_networkCallCount;
 
-    // === BACKPROPAGATION ===
-    // Risale fino alla radice (negamax): visite +1, valore += value, poi inverte il segno ad ogni livello.
-    MCTSNode* current = node;
-    while (current != nullptr)
-    {
-        current->visitCount++;
-        current->totalValue += value;
-        value = -value;
-        current = current->parent;
-    }
-
-    // === SOLVER ===
-    // Se la foglia ha un risultato certo, prova a propagarlo verso la radice
-    if (node->provenResult != 0 && node->parent != nullptr)
-    {
-        TrySolve(node->parent);
+        tt.Store(hash, value, static_cast<int16_t>(depth), node->isTerminal);
+        backup(node, value);
     }
 }
 
@@ -634,7 +599,7 @@ Move MCTS::SearchIterations(const Board& rootBoard, int maxIterations)
     root.visitCount = 1;
     TranspositionTable& tt = GetPersistentTranspositionTable();
 
-    for (int i = 0; i < maxIterations; i++)
+    for (int i = 0; i < maxIterations; ++i)
     {
         RunIteration(&root, rootBoard, tt);
         if (root.provenResult != 0)

@@ -122,9 +122,7 @@ public:
     static void SetValueNetwork(TorchScriptValueEvaluator* evaluator);
 
     // Statistiche di profiling sulle chiamate reali alla value network durante
-    // l'ultima ricerca (esclude le foglie servite dalla transposition table).
-    // Usate per benchmark (vedi tests/TestTournamentBenchmark.cpp), non nel
-    // normale funzionamento del motore.
+    // l'ultima ricerca del thread corrente.
     static void ResetNetworkStats();
     static double GetNetworkTimeMs();
     static long GetNetworkCallCount();
@@ -145,8 +143,8 @@ private:
     static constexpr double EXPLORATION_C = 1.0;        // Peso dell'esplorazione in UCB/PUCT
     static constexpr int TIME_CHECK_INTERVAL = 128;     // Controlla il tempo ogni N iterazioni
 
-    // Restituisce la transposition table persistente (per tutta la durata del
-    // processo), allocandola al primo uso.
+    // Restituisce la transposition table persistente del thread corrente,
+    // allocandola al primo uso.
     static TranspositionTable& GetPersistentTranspositionTable();
 
     // Algoritmo

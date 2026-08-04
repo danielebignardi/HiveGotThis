@@ -1,16 +1,48 @@
 #include "NeuralEvaluator.h"
 #include "MoveEncoder.h"
 
+#include <torch/cuda.h>
 #include <torch/utils.h> // torch::set_num_threads (non incluso da torch/script.h)
 
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <stdexcept>
+#include <utility>
 
 namespace HiveGotThis
 {
 
-TorchScriptValueEvaluator::TorchScriptValueEvaluator(const std::string& modelPath)
-    : m_module(torch::jit::load(modelPath))
+namespace
+{
+torch::Device ResolveDevice(const std::string& requested)
+{
+    if (requested == "auto")
+        return torch::cuda::is_available() ? torch::Device(torch::kCUDA)
+                                           : torch::Device(torch::kCPU);
+
+    torch::Device device(requested);
+    if (device.is_cuda() && !torch::cuda::is_available())
+        throw std::runtime_error("CUDA requested but no CUDA device is available");
+    return device;
+}
+}
+
+struct TorchScriptValueEvaluator::ValueRequest
+{
+    explicit ValueRequest(GNNGraph encodedGraph)
+        : graph(std::move(encodedGraph))
+    {
+    }
+
+    GNNGraph graph;
+    std::promise<float> result;
+};
+
+TorchScriptValueEvaluator::TorchScriptValueEvaluator(const std::string& modelPath,
+                                                     const std::string& device)
+    : m_device(ResolveDevice(device))
+    , m_module(torch::jit::load(modelPath, m_device))
 {
     // Carichiamo il file .pt esportato da Python con torch.jit.script.
     //
@@ -22,6 +54,24 @@ TorchScriptValueEvaluator::TorchScriptValueEvaluator(const std::string& modelPat
     // Se non chiamassimo eval(), la rete potrebbe produrre risultati diversi
     // a ogni chiamata, perche' Dropout resterebbe attivo.
     m_module.eval();
+    m_module.to(m_device);
+    m_hasPolicyHead = static_cast<bool>(m_module.find_method("forward_policy"));
+    // Un modello v1 esporta comunque anche forward_policy_v2 (TorchScript
+    // esporta tutti i metodi), ma con pesi mai allenati: fa fede l'attributo
+    // policy_version scritto dall'export, non la presenza del metodo.
+    if (m_module.hasattr("policy_version"))
+        m_policyVersion = m_module.attr("policy_version").toInt();
+}
+
+TorchScriptValueEvaluator::~TorchScriptValueEvaluator()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_stopValueBatchThread = true;
+    }
+    m_queueReady.notify_all();
+    if (m_valueBatchThread.joinable())
+        m_valueBatchThread.join();
 }
 
 void TorchScriptValueEvaluator::SetTorchThreads(int numThreads)
@@ -35,13 +85,100 @@ void TorchScriptValueEvaluator::SetTorchThreads(int numThreads)
     torch::set_num_threads(numThreads);
 }
 
+void TorchScriptValueEvaluator::EnableCrossGameBatching(int maxBatchSize,
+                                                        int maxWaitMicros)
+{
+    if (maxBatchSize < 1)
+        throw std::invalid_argument("maxBatchSize must be >= 1");
+    if (maxWaitMicros < 1)
+        throw std::invalid_argument("maxWaitMicros must be >= 1");
+    if (m_valueBatchThread.joinable())
+        throw std::logic_error("cross-game batching is already enabled");
+
+    m_crossGameBatchSize = maxBatchSize;
+    m_crossGameMaxWaitMicros = maxWaitMicros;
+    m_stopValueBatchThread = false;
+
+    if (maxBatchSize > 1)
+        m_valueBatchThread = std::thread(&TorchScriptValueEvaluator::ValueBatchWorker, this);
+}
+
+void TorchScriptValueEvaluator::ValueBatchWorker()
+{
+    while (true)
+    {
+        std::vector<std::shared_ptr<ValueRequest>> requests;
+
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_queueReady.wait(lock, [this]
+            {
+                return m_stopValueBatchThread || !m_valueQueue.empty();
+            });
+
+            if (m_stopValueBatchThread && m_valueQueue.empty())
+                return;
+
+            const auto deadline = std::chrono::steady_clock::now()
+                + std::chrono::microseconds(m_crossGameMaxWaitMicros);
+            m_queueReady.wait_until(lock, deadline, [this]
+            {
+                return m_stopValueBatchThread
+                    || static_cast<int>(m_valueQueue.size()) >= m_crossGameBatchSize;
+            });
+
+            const size_t count = std::min(
+                m_valueQueue.size(), static_cast<size_t>(m_crossGameBatchSize));
+            requests.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                requests.push_back(std::move(m_valueQueue.front()));
+                m_valueQueue.pop_front();
+            }
+        }
+
+        try
+        {
+            std::vector<GNNGraph> graphs;
+            graphs.reserve(requests.size());
+            for (const auto& request : requests)
+                graphs.push_back(std::move(request->graph));
+
+            std::vector<float> values = EvaluateGraphs(graphs);
+            if (values.size() != requests.size())
+                throw std::runtime_error(
+                    "cross-game value batch returned an invalid result count");
+
+            for (size_t i = 0; i < requests.size(); ++i)
+                requests[i]->result.set_value(values[i]);
+        }
+        catch (...)
+        {
+            std::exception_ptr error = std::current_exception();
+            for (const auto& request : requests)
+                request->result.set_exception(error);
+        }
+    }
+}
+
 float TorchScriptValueEvaluator::EvaluateBoard(const Board& board)
 {
     // Questo e' il metodo piu' comodo da usare dall'esterno.
     //
     // Chi lo chiama passa una Board normale del motore.
     // Noi la convertiamo nel formato numerico della GNN tramite BoardEncoder.
-    return EvaluateGraph(BoardEncoder::encode(board));
+    GNNGraph graph = BoardEncoder::encode(board);
+    if (!m_valueBatchThread.joinable())
+        return EvaluateGraph(graph);
+
+    auto request = std::make_shared<ValueRequest>(std::move(graph));
+    std::future<float> result = request->result.get_future();
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_valueQueue.push_back(request);
+    }
+    m_queueReady.notify_one();
+    return result.get();
 }
 
 float TorchScriptValueEvaluator::EvaluateGraph(const GNNGraph& graph)
@@ -128,17 +265,21 @@ float TorchScriptValueEvaluator::EvaluateGraph(const GNNGraph& graph)
     //
     // L'ordine qui deve combaciare esattamente con quello del modello Python.
     std::vector<torch::jit::IValue> inputs = {
-        x,
-        edgeIndex,
-        edgeAttr,
-        u,
-        batch
+        x.to(m_device),
+        edgeIndex.to(m_device),
+        edgeAttr.to(m_device),
+        u.to(m_device),
+        batch.to(m_device)
     };
 
     // Eseguiamo il forward della rete.
     //
     // out dovrebbe avere forma [1, 1] per un singolo grafo.
-    torch::Tensor out = m_module.forward(inputs).toTensor();
+    torch::Tensor out;
+    {
+        std::lock_guard<std::mutex> lock(m_moduleMutex);
+        out = m_module.forward(inputs).toTensor().to(torch::kCPU);
+    }
     ValidateOutput(out, 1);
 
     // Convertiamo il tensore di output in un float C++.
@@ -304,14 +445,18 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateGraphs(const std::vector<G
     //
     // Se graphs.size() == B, l'output atteso e' [B, 1].
     std::vector<torch::jit::IValue> inputs = {
-        x,
-        edgeIndex,
-        edgeAttr,
-        u,
-        batch
+        x.to(m_device),
+        edgeIndex.to(m_device),
+        edgeAttr.to(m_device),
+        u.to(m_device),
+        batch.to(m_device)
     };
 
-    torch::Tensor out = m_module.forward(inputs).toTensor();
+    torch::Tensor out;
+    {
+        std::lock_guard<std::mutex> lock(m_moduleMutex);
+        out = m_module.forward(inputs).toTensor().to(torch::kCPU);
+    }
     ValidateOutput(out, static_cast<int64_t>(graphs.size()));
 
     // Portiamo l'output da [B, 1] a [B], cosi' e' facile copiarlo
@@ -341,19 +486,10 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
 
     ValidateGraph(graph);
 
-    // policy_version (attributo scritto dall'export): 2 = testa "edge
-    // prediction" sugli embedding dei nodi (forward_policy_v2); 1 o assente =
-    // testa sulle 32 move features. Un modello v1 esporta comunque anche il
-    // metodo v2 (TorchScript esporta tutto), ma con pesi mai allenati: per
-    // questo fa fede l'attributo, non la presenza del metodo.
-    int64_t policyVersion = 1;
-    if (m_module.hasattr("policy_version"))
-        policyVersion = m_module.attr("policy_version").toInt();
-
-    auto policyMethod = (policyVersion == 2)
-        ? m_module.find_method("forward_policy_v2")
-        : m_module.find_method("forward_policy");
-    if (!policyMethod)
+    // I modelli value-only non hanno nessuna testa di policy: fallback
+    // dell'MCTS alle prior euristiche. Quale testa usare (v1 move features
+    // o v2 embedding) lo dice m_policyVersion, letto al caricamento.
+    if (!m_hasPolicyHead)
         return {};
 
     torch::NoGradGuard noGrad;
@@ -404,7 +540,7 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
 
     std::vector<torch::jit::IValue> inputs;
 
-    if (policyVersion == 2)
+    if (m_policyVersion == 2)
     {
         // La v2 usa solo i primi 12 move feature (identita' della mossa:
         // one-hot insetto, colore, piazzamento, movimento, pass) piu' la
@@ -466,11 +602,24 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
         inputs = {x, edgeIndex, edgeAttr, u, batch, moveFeatures, moveBatch};
     }
 
-    torch::Tensor logits = (*policyMethod)(inputs).toTensor();
-    if (!logits.defined() || logits.numel() != moveCount)
-        throw std::runtime_error("TorchScript policy head returned an unexpected number of logits");
+    // Sul device del modello (CPU o GPU), qualunque testa sia in uso.
+    for (auto& value : inputs)
+        value = value.toTensor().to(m_device);
 
-    torch::Tensor priorsTensor = torch::softmax(logits.reshape({moveCount}), 0);
+    torch::Tensor priorsTensor;
+    {
+        std::lock_guard<std::mutex> lock(m_moduleMutex);
+        auto policyMethod = m_module.find_method(
+            m_policyVersion == 2 ? "forward_policy_v2" : "forward_policy");
+        if (!policyMethod)
+            throw std::runtime_error("TorchScript policy head disappeared at runtime");
+        torch::Tensor logits = (*policyMethod)(inputs).toTensor();
+        if (!logits.defined() || logits.numel() != moveCount)
+            throw std::runtime_error(
+                "TorchScript policy head returned an unexpected number of logits");
+        priorsTensor =
+            torch::softmax(logits.reshape({moveCount}), 0).to(torch::kCPU);
+    }
 
     std::vector<float> priors;
     priors.reserve(moves.size());
