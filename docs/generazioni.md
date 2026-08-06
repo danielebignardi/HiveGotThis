@@ -44,6 +44,7 @@ all'epoca 17: val MSE 0.681, policy CE 2.5645, segno-ok 72,1%.
 |---|---|---|---|---|
 | F1: hidden 32 | −50% larghezza ⇒ +40% iterazioni MCTS compensano | MSE 0.6831 (≈pari), CE 2.8354 (+0,6%) | cancello 51% (40 partite), iterazioni fisse 57% (20), nokamute 45% (20), Mzinga 10-0 | **equivalente al campione a metà costo**: non promosso, ma candidato motore per il self-play (≈+40% partite/ora) |
 | F2: policy v2 | gli embedding battono le 32 feature a mano | **CE 2.5645 vs 2.8172**, MSE pari | vedi promozione sopra | **promosso** |
+| F3: v2 su tronco h32 (6 ago) | policy migliore + rete veloce insieme | MSE 0.6816, CE 2.6136 (+1,9% vs campione) | cancello 52% (13-12-5/30), nokamute 40% (7-11-2/20) vs 55% del campione | **non promosso**: pari nel derby, sotto sulla scala esterna — il tronco dimezzato costa alla testa v2 piu' che alla v1; resta il generatore piu' veloce con policy v2 per il self-play |
 | S0: baseline screening | riferimento (6 epoche, 50% dati) | MSE 0.6873, CE 2.9070 | — | metro degli screening |
 | S3: dropout 0.1 | con l'augmentation, 0.2 regolarizza troppo | MSE 0.6845, CE 2.8803: batte S0 su entrambe | — | **vince lo screening**: candidato al run pieno (combinato con la v2) nella prossima finestra |
 | S1/S2: policy-weight 0.5/2.0 | bilanciamento delle due loss | non eseguiti (fine quota/fase) | — | riproposti per la prossima finestra |
