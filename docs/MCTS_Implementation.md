@@ -331,7 +331,7 @@ e ogni partita viene scritta come blocco completo.
 | Transposition table | un worker | `thread_local` |
 | Statistiche MCTS | un worker | `thread_local` |
 | Modello TorchScript | condiviso | `m_moduleMutex` |
-| Coda delle value request | condivisa | mutex + condition variable |
+| Code value e policy | condivise | mutex + condition variable separate |
 | Output JSONL | thread principale | risultati consegnati tramite mutex |
 
 Anche i buffer temporanei riutilizzati da `Board.cpp` e `Evaluation.cpp` sono
@@ -341,7 +341,8 @@ permettere a due partite di scrivere nello stesso scratch buffer.
 ### 8.3 Batching tra partite
 
 `TorchScriptValueEvaluator::EnableCrossGameBatching` avvia un inference worker
-dedicato. Quando una MCTS incontra un cache miss:
+per il value head e, se il modello la espone, uno per la policy head. Quando
+una MCTS incontra un cache miss value:
 
 1. codifica la board in `GNNGraph`;
 2. inserisce una `ValueRequest` nella coda;
@@ -372,10 +373,12 @@ La policy head viene usata durante l'espansione tramite
 `EvaluateMovePriors`. Il forward e' protetto dallo stesso mutex del modello,
 quindi e' sicuro tra thread.
 
-Attualmente le richieste policy non sono aggregate nella coda cross-game:
-sono eseguite e serializzate una alla volta. Il batching condiviso riguarda la
-value head, che rappresenta il percorso di valutazione delle foglie. Il
-batching della policy e' una possibile ottimizzazione futura.
+Quando il batching cross-game e' attivo, le richieste policy vengono codificate
+dal worker MCTS e aggregate in una coda separata. `PolicyBatchWorker` concatena
+grafi e feature delle mosse, usa `move_batch` per associare ogni mossa alla
+posizione corretta ed esegue un solo `forward_policy`. La softmax viene poi
+applicata separatamente alle mosse di ciascuna posizione, quindi una partita
+non influenza le prior delle altre.
 
 ### 8.5 Perche' non parallelizzare il singolo albero
 
@@ -413,7 +416,7 @@ Questo comando usa:
 - 32 partite totali;
 - 16 partite concorrenti;
 - CUDA;
-- batch value fino a 16 richieste;
+- batch value e policy fino a 16 richieste ciascuno;
 - attesa massima del batch di 2000 microsecondi.
 
 I default sono:

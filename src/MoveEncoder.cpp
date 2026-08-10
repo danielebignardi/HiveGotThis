@@ -108,9 +108,10 @@ bool isInstantWin(const Board& board, const Move& move, Color perspective)
 }
 }
 
-std::vector<float> EncodeMoveFeatures(const Board& board, const Move& move)
+void EncodeMoveFeaturesInto(const Board& board, const Move& move, float* output)
 {
-    std::vector<float> f(MoveFeatureDim, 0.0f);
+    std::fill(output, output + MoveFeatureDim, 0.0f);
+    float* f = output;
 
     const Color myColor = board.currentColor;
     const PieceName myQueen = (myColor == Color::White) ? PieceName::wQ : PieceName::bQ;
@@ -124,7 +125,7 @@ std::vector<float> EncodeMoveFeatures(const Board& board, const Move& move)
         f[29] = std::min(1.0f, static_cast<float>(board.GetCurrentTurn()) / TurnNorm);
         f[30] = myQueenPos != NullIndex ? 1.0f : 0.0f;
         f[31] = enemyQueenPos != NullIndex ? 1.0f : 0.0f;
-        return f;
+        return;
     }
 
     int bugSlot = bugTypeToPolicySlot(GetBugType(move.Piece));
@@ -165,8 +166,13 @@ std::vector<float> EncodeMoveFeatures(const Board& board, const Move& move)
     f[29] = std::min(1.0f, static_cast<float>(board.GetCurrentTurn()) / TurnNorm);
     f[30] = myQueenPos != NullIndex ? 1.0f : 0.0f;
     f[31] = enemyQueenPos != NullIndex ? 1.0f : 0.0f;
+}
 
-    return f;
+std::vector<float> EncodeMoveFeatures(const Board& board, const Move& move)
+{
+    std::vector<float> features(MoveFeatureDim);
+    EncodeMoveFeaturesInto(board, move, features.data());
+    return features;
 }
 
 std::string MoveFeaturesToJson(const std::vector<float>& features)

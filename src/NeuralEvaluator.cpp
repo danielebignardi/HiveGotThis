@@ -3,6 +3,7 @@
 
 #include <torch/cuda.h>
 #include <torch/utils.h> // torch::set_num_threads (non incluso da torch/script.h)
+#include <c10/core/InferenceMode.h>
 
 #include <algorithm>
 #include <chrono>
@@ -39,6 +40,19 @@ struct TorchScriptValueEvaluator::ValueRequest
     std::promise<float> result;
 };
 
+struct TorchScriptValueEvaluator::PolicyRequest
+{
+    PolicyRequest(GNNGraph encodedGraph, std::vector<float> encodedMoves)
+        : graph(std::move(encodedGraph))
+        , moveFeatures(std::move(encodedMoves))
+    {
+    }
+
+    GNNGraph graph;
+    std::vector<float> moveFeatures;
+    std::promise<std::vector<float>> result;
+};
+
 TorchScriptValueEvaluator::TorchScriptValueEvaluator(const std::string& modelPath,
                                                      const std::string& device)
     : m_device(ResolveDevice(device))
@@ -62,11 +76,14 @@ TorchScriptValueEvaluator::~TorchScriptValueEvaluator()
 {
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
-        m_stopValueBatchThread = true;
+        m_stopBatchThreads = true;
     }
-    m_queueReady.notify_all();
+    m_valueQueueReady.notify_all();
+    m_policyQueueReady.notify_all();
     if (m_valueBatchThread.joinable())
         m_valueBatchThread.join();
+    if (m_policyBatchThread.joinable())
+        m_policyBatchThread.join();
 }
 
 void TorchScriptValueEvaluator::SetTorchThreads(int numThreads)
@@ -92,10 +109,14 @@ void TorchScriptValueEvaluator::EnableCrossGameBatching(int maxBatchSize,
 
     m_crossGameBatchSize = maxBatchSize;
     m_crossGameMaxWaitMicros = maxWaitMicros;
-    m_stopValueBatchThread = false;
+    m_stopBatchThreads = false;
 
     if (maxBatchSize > 1)
+    {
         m_valueBatchThread = std::thread(&TorchScriptValueEvaluator::ValueBatchWorker, this);
+        if (m_hasPolicyHead)
+            m_policyBatchThread = std::thread(&TorchScriptValueEvaluator::PolicyBatchWorker, this);
+    }
 }
 
 void TorchScriptValueEvaluator::ValueBatchWorker()
@@ -106,19 +127,19 @@ void TorchScriptValueEvaluator::ValueBatchWorker()
 
         {
             std::unique_lock<std::mutex> lock(m_queueMutex);
-            m_queueReady.wait(lock, [this]
+            m_valueQueueReady.wait(lock, [this]
             {
-                return m_stopValueBatchThread || !m_valueQueue.empty();
+                return m_stopBatchThreads || !m_valueQueue.empty();
             });
 
-            if (m_stopValueBatchThread && m_valueQueue.empty())
+            if (m_stopBatchThreads && m_valueQueue.empty())
                 return;
 
             const auto deadline = std::chrono::steady_clock::now()
                 + std::chrono::microseconds(m_crossGameMaxWaitMicros);
-            m_queueReady.wait_until(lock, deadline, [this]
+            m_valueQueueReady.wait_until(lock, deadline, [this]
             {
-                return m_stopValueBatchThread
+                return m_stopBatchThreads
                     || static_cast<int>(m_valueQueue.size()) >= m_crossGameBatchSize;
             });
 
@@ -156,6 +177,59 @@ void TorchScriptValueEvaluator::ValueBatchWorker()
     }
 }
 
+void TorchScriptValueEvaluator::PolicyBatchWorker()
+{
+    while (true)
+    {
+        std::vector<std::shared_ptr<PolicyRequest>> requests;
+
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_policyQueueReady.wait(lock, [this]
+            {
+                return m_stopBatchThreads || !m_policyQueue.empty();
+            });
+
+            if (m_stopBatchThreads && m_policyQueue.empty())
+                return;
+
+            const auto deadline = std::chrono::steady_clock::now()
+                + std::chrono::microseconds(m_crossGameMaxWaitMicros);
+            m_policyQueueReady.wait_until(lock, deadline, [this]
+            {
+                return m_stopBatchThreads
+                    || static_cast<int>(m_policyQueue.size()) >= m_crossGameBatchSize;
+            });
+
+            const size_t count = std::min(
+                m_policyQueue.size(), static_cast<size_t>(m_crossGameBatchSize));
+            requests.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                requests.push_back(std::move(m_policyQueue.front()));
+                m_policyQueue.pop_front();
+            }
+        }
+
+        try
+        {
+            std::vector<std::vector<float>> priors = EvaluatePolicyBatch(requests);
+            if (priors.size() != requests.size())
+                throw std::runtime_error(
+                    "cross-game policy batch returned an invalid result count");
+
+            for (size_t i = 0; i < requests.size(); ++i)
+                requests[i]->result.set_value(std::move(priors[i]));
+        }
+        catch (...)
+        {
+            std::exception_ptr error = std::current_exception();
+            for (const auto& request : requests)
+                request->result.set_exception(error);
+        }
+    }
+}
+
 float TorchScriptValueEvaluator::EvaluateBoard(const Board& board)
 {
     // Questo e' il metodo piu' comodo da usare dall'esterno.
@@ -172,7 +246,7 @@ float TorchScriptValueEvaluator::EvaluateBoard(const Board& board)
         std::lock_guard<std::mutex> lock(m_queueMutex);
         m_valueQueue.push_back(request);
     }
-    m_queueReady.notify_one();
+    m_valueQueueReady.notify_one();
     return result.get();
 }
 
@@ -187,7 +261,7 @@ float TorchScriptValueEvaluator::EvaluateGraph(const GNNGraph& graph)
     //
     // In C++ stiamo solo facendo inferenza, non training, quindi autograd non
     // serve. Questo riduce memoria usata e overhead.
-    torch::NoGradGuard noGrad;
+    c10::InferenceMode inferenceMode;
 
     // Il BoardEncoder salva i dati in vettori piatti.
     // Qui ricostruiamo le dimensioni logiche:
@@ -273,7 +347,7 @@ float TorchScriptValueEvaluator::EvaluateGraph(const GNNGraph& graph)
     torch::Tensor out;
     {
         std::lock_guard<std::mutex> lock(m_moduleMutex);
-        out = m_module.forward(inputs).toTensor().to(torch::kCPU);
+        out = m_module.forward(inputs).toTensor().to(torch::kCPU).to(torch::kFloat32);
     }
     ValidateOutput(out, 1);
 
@@ -312,7 +386,7 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateGraphs(const std::vector<G
         ValidateGraph(graph);
 
     // Anche qui siamo solo in inferenza: niente gradienti.
-    torch::NoGradGuard noGrad;
+    c10::InferenceMode inferenceMode;
 
     // Questi vettori conterranno il batch concatenato.
     //
@@ -450,7 +524,7 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateGraphs(const std::vector<G
     torch::Tensor out;
     {
         std::lock_guard<std::mutex> lock(m_moduleMutex);
-        out = m_module.forward(inputs).toTensor().to(torch::kCPU);
+        out = m_module.forward(inputs).toTensor().to(torch::kCPU).to(torch::kFloat32);
     }
     ValidateOutput(out, static_cast<int64_t>(graphs.size()));
 
@@ -458,18 +532,14 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateGraphs(const std::vector<G
     // in un std::vector<float>.
     out = out.reshape({static_cast<int64_t>(graphs.size())});
 
-    std::vector<float> values;
-    values.reserve(graphs.size());
-
-    for (int64_t i = 0; i < out.size(0); ++i)
-        values.push_back(out[i].item<float>());
-
-    return values;
+    out = out.contiguous();
+    const float* values = out.data_ptr<float>();
+    return std::vector<float>(values, values + graphs.size());
 }
 
 std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& board, const std::vector<Move>& moves)
 {
-    if (moves.empty())
+    if (moves.empty() || !m_hasPolicyHead)
         return {};
 
     GNNGraph graph = BoardEncoder::encode(board);
@@ -481,68 +551,124 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
 
     ValidateGraph(graph);
 
-    if (!m_hasPolicyHead)
+    std::vector<float> moveFeatureValues(moves.size() * MoveFeatureDim);
+    for (size_t i = 0; i < moves.size(); ++i)
+    {
+        EncodeMoveFeaturesInto(
+            board, moves[i], moveFeatureValues.data() + i * MoveFeatureDim);
+    }
+
+    auto request = std::make_shared<PolicyRequest>(
+        std::move(graph), std::move(moveFeatureValues));
+    if (!m_policyBatchThread.joinable())
+    {
+        std::vector<std::shared_ptr<PolicyRequest>> requests = {request};
+        return EvaluatePolicyBatch(requests).front();
+    }
+
+    std::future<std::vector<float>> result = request->result.get_future();
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_policyQueue.push_back(request);
+    }
+    m_policyQueueReady.notify_one();
+    return result.get();
+}
+
+std::vector<std::vector<float>> TorchScriptValueEvaluator::EvaluatePolicyBatch(
+    const std::vector<std::shared_ptr<PolicyRequest>>& requests)
+{
+    if (requests.empty())
         return {};
 
-    torch::NoGradGuard noGrad;
+    c10::InferenceMode inferenceMode;
 
-    const int64_t nodeCount = NodeCount(graph);
-    const int64_t edgeCount = EdgeCount(graph);
-    const int64_t moveCount = static_cast<int64_t>(moves.size());
+    int64_t totalNodes = 0;
+    int64_t totalEdges = 0;
+    int64_t totalMoves = 0;
+    for (const auto& request : requests)
+    {
+        ValidateGraph(request->graph);
+        if (request->moveFeatures.empty()
+            || request->moveFeatures.size() % MoveFeatureDim != 0)
+        {
+            throw std::invalid_argument(
+                "policy move features have an invalid size");
+        }
+        totalNodes += NodeCount(request->graph);
+        totalEdges += EdgeCount(request->graph);
+        totalMoves += static_cast<int64_t>(request->moveFeatures.size() / MoveFeatureDim);
+    }
+
+    std::vector<float> xb;
+    std::vector<float> edgeAttrB;
+    std::vector<float> ub;
+    std::vector<float> moveFeaturesB;
+    std::vector<int64_t> src;
+    std::vector<int64_t> dst;
+    std::vector<int64_t> batchIds;
+    std::vector<int64_t> moveBatchIds;
+
+    xb.reserve(static_cast<size_t>(totalNodes) * GNNNodeDim);
+    edgeAttrB.reserve(static_cast<size_t>(totalEdges) * GNNEdgeDim);
+    ub.reserve(requests.size() * GNNGlobalDim);
+    moveFeaturesB.reserve(static_cast<size_t>(totalMoves) * MoveFeatureDim);
+    src.reserve(static_cast<size_t>(totalEdges));
+    dst.reserve(static_cast<size_t>(totalEdges));
+    batchIds.reserve(static_cast<size_t>(totalNodes));
+    moveBatchIds.reserve(static_cast<size_t>(totalMoves));
+
+    int64_t nodeOffset = 0;
+    for (size_t graphId = 0; graphId < requests.size(); ++graphId)
+    {
+        const PolicyRequest& request = *requests[graphId];
+        const GNNGraph& graph = request.graph;
+        const int64_t nodeCount = NodeCount(graph);
+        const int64_t edgeCount = EdgeCount(graph);
+        const int64_t moveCount =
+            static_cast<int64_t>(request.moveFeatures.size() / MoveFeatureDim);
+
+        xb.insert(xb.end(), graph.x.begin(), graph.x.end());
+        edgeAttrB.insert(edgeAttrB.end(), graph.edge_attr.begin(), graph.edge_attr.end());
+        ub.insert(ub.end(), graph.u.begin(), graph.u.end());
+        moveFeaturesB.insert(
+            moveFeaturesB.end(), request.moveFeatures.begin(), request.moveFeatures.end());
+        batchIds.insert(
+            batchIds.end(), static_cast<size_t>(nodeCount), static_cast<int64_t>(graphId));
+        moveBatchIds.insert(
+            moveBatchIds.end(), static_cast<size_t>(moveCount), static_cast<int64_t>(graphId));
+
+        for (int64_t edge = 0; edge < edgeCount; ++edge)
+            src.push_back(graph.edge_index[static_cast<size_t>(edge)] + nodeOffset);
+        for (int64_t edge = 0; edge < edgeCount; ++edge)
+        {
+            dst.push_back(
+                graph.edge_index[static_cast<size_t>(edgeCount + edge)] + nodeOffset);
+        }
+        nodeOffset += nodeCount;
+    }
+
+    std::vector<int64_t> edgeIndexB;
+    edgeIndexB.reserve(src.size() + dst.size());
+    edgeIndexB.insert(edgeIndexB.end(), src.begin(), src.end());
+    edgeIndexB.insert(edgeIndexB.end(), dst.begin(), dst.end());
 
     auto fopt = torch::TensorOptions().dtype(torch::kFloat32);
     auto iopt = torch::TensorOptions().dtype(torch::kInt64);
-
     torch::Tensor x = torch::from_blob(
-        graph.x.data(),
-        {nodeCount, GNNNodeDim},
-        fopt
-    );
-
+        xb.data(), {totalNodes, GNNNodeDim}, fopt);
     torch::Tensor edgeIndex = torch::from_blob(
-        graph.edge_index.data(),
-        {2, edgeCount},
-        iopt
-    );
-
+        edgeIndexB.data(), {2, totalEdges}, iopt);
     torch::Tensor edgeAttr = torch::from_blob(
-        graph.edge_attr.data(),
-        {edgeCount, GNNEdgeDim},
-        fopt
-    );
-
+        edgeAttrB.data(), {totalEdges, GNNEdgeDim}, fopt);
     torch::Tensor u = torch::from_blob(
-        graph.u.data(),
-        {1, GNNGlobalDim},
-        fopt
-    );
-
-    torch::Tensor batch = torch::zeros({nodeCount}, iopt);
-
-    std::vector<float> moveFeatureValues;
-    moveFeatureValues.reserve(static_cast<size_t>(moveCount) * MoveFeatureDim);
-
-    for (const Move& move : moves)
-    {
-        std::vector<float> features = EncodeMoveFeatures(board, move);
-        if (features.size() != MoveFeatureDim)
-            throw std::runtime_error("EncodeMoveFeatures returned an unexpected feature size");
-        moveFeatureValues.insert(moveFeatureValues.end(), features.begin(), features.end());
-    }
-
-    std::vector<int64_t> moveBatchIds(static_cast<size_t>(moveCount), 0);
-
+        ub.data(), {static_cast<int64_t>(requests.size()), GNNGlobalDim}, fopt);
+    torch::Tensor batch = torch::from_blob(
+        batchIds.data(), {totalNodes}, iopt);
     torch::Tensor moveFeatures = torch::from_blob(
-        moveFeatureValues.data(),
-        {moveCount, MoveFeatureDim},
-        fopt
-    );
-
+        moveFeaturesB.data(), {totalMoves, MoveFeatureDim}, fopt);
     torch::Tensor moveBatch = torch::from_blob(
-        moveBatchIds.data(),
-        {moveCount},
-        iopt
-    );
+        moveBatchIds.data(), {totalMoves}, iopt);
 
     std::vector<torch::jit::IValue> inputs = {
         x.to(m_device),
@@ -561,19 +687,42 @@ std::vector<float> TorchScriptValueEvaluator::EvaluateMovePriors(const Board& bo
         if (!policyMethod)
             throw std::runtime_error("TorchScript policy head disappeared at runtime");
         torch::Tensor logits = (*policyMethod)(inputs).toTensor();
-        if (!logits.defined() || logits.numel() != moveCount)
+        if (!logits.defined() || logits.numel() != totalMoves)
             throw std::runtime_error(
                 "TorchScript policy head returned an unexpected number of logits");
-        priorsTensor =
-            torch::softmax(logits.reshape({moveCount}), 0).to(torch::kCPU);
+
+        logits = logits.reshape({totalMoves});
+        std::vector<torch::Tensor> normalized;
+        normalized.reserve(requests.size());
+        int64_t moveOffset = 0;
+        for (const auto& request : requests)
+        {
+            const int64_t moveCount =
+                static_cast<int64_t>(request->moveFeatures.size() / MoveFeatureDim);
+            normalized.push_back(
+                torch::softmax(logits.narrow(0, moveOffset, moveCount), 0));
+            moveOffset += moveCount;
+        }
+        priorsTensor = torch::cat(normalized)
+            .to(torch::kCPU)
+            .to(torch::kFloat32)
+            .contiguous();
     }
 
-    std::vector<float> priors;
-    priors.reserve(moves.size());
-    for (int64_t i = 0; i < moveCount; ++i)
-        priors.push_back(priorsTensor[i].item<float>());
+    std::vector<std::vector<float>> allPriors;
+    allPriors.reserve(requests.size());
+    const float* priorData = priorsTensor.data_ptr<float>();
+    int64_t moveOffset = 0;
+    for (const auto& request : requests)
+    {
+        const int64_t moveCount =
+            static_cast<int64_t>(request->moveFeatures.size() / MoveFeatureDim);
+        allPriors.emplace_back(
+            priorData + moveOffset, priorData + moveOffset + moveCount);
+        moveOffset += moveCount;
+    }
 
-    return priors;
+    return allPriors;
 }
 int64_t TorchScriptValueEvaluator::NodeCount(const GNNGraph& graph)
 {

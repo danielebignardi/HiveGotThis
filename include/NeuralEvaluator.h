@@ -61,8 +61,8 @@ public:
     // intra-op di libtorch a 1 e parallelizzare a livello di ricerca.
     static void SetTorchThreads(int numThreads);
 
-    // Attiva il coordinatore condiviso per il self-play parallelo. Ogni MCTS
-    // invia una sola foglia e resta in attesa; il coordinatore aggrega richieste
+    // Attiva i coordinatori condivisi per il self-play parallelo. Ogni MCTS
+    // resta in attesa mentre value e policy aggregano separatamente richieste
     // provenienti da partite diverse fino a maxBatchSize o maxWaitMicros.
     void EnableCrossGameBatching(int maxBatchSize, int maxWaitMicros = 2000);
 
@@ -100,8 +100,12 @@ public:
 
 private:
     struct ValueRequest;
+    struct PolicyRequest;
 
     void ValueBatchWorker();
+    void PolicyBatchWorker();
+    std::vector<std::vector<float>> EvaluatePolicyBatch(
+        const std::vector<std::shared_ptr<PolicyRequest>>& requests);
 
     static int64_t NodeCount(const GNNGraph& graph);// num nodi e numero edge per creare il tensore
     static int64_t EdgeCount(const GNNGraph& graph);
@@ -116,10 +120,13 @@ Se valuti 8 board in batch, deve restituire 8 valori.*/
     std::mutex m_moduleMutex;
 
     std::mutex m_queueMutex;
-    std::condition_variable m_queueReady;
+    std::condition_variable m_valueQueueReady;
+    std::condition_variable m_policyQueueReady;
     std::deque<std::shared_ptr<ValueRequest>> m_valueQueue;
+    std::deque<std::shared_ptr<PolicyRequest>> m_policyQueue;
     std::thread m_valueBatchThread;
-    bool m_stopValueBatchThread = false;
+    std::thread m_policyBatchThread;
+    bool m_stopBatchThreads = false;
     int m_crossGameBatchSize = 1;
     int m_crossGameMaxWaitMicros = 2000;
     bool m_hasPolicyHead = false;

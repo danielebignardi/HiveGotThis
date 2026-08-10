@@ -16,6 +16,10 @@ constexpr int MoveFeatureDim = 32;
 // prospettiva del giocatore che deve muovere nella board passata.
 std::vector<float> EncodeMoveFeatures(const Board& board, const Move& move);
 
+// Variante senza allocazioni per i percorsi caldi: output deve puntare ad
+// almeno MoveFeatureDim float e viene sovrascritto completamente.
+void EncodeMoveFeaturesInto(const Board& board, const Move& move, float* output);
+
 std::string MoveFeaturesToJson(const std::vector<float>& features);
 
 // Indice del pezzo tra i nodi del grafo di BoardEncoder: i nodi sono i pezzi
